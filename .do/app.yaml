@@ -1,0 +1,30 @@
+name: gearhead-fea
+services:
+  - name: backend
+    github:
+      repo: CarlGubz/gearhead-fea
+      branch: main
+      deploy_on_push: true
+    source_dir: backend
+    dockerfile_path: backend/Dockerfile
+    http_port: 8000
+    routes:
+      - path: /api
+    envs:
+      - key: DATABASE_URL
+        value: sqlite:///./data/webfea.db
+
+  - name: frontend
+    github:
+      repo: CarlGubz/gearhead-fea
+      branch: main
+      deploy_on_push: true
+    source_dir: frontend
+    dockerfile_path: frontend/Dockerfile
+    http_port: 5173
+    routes:
+      - path: /
+    envs:
+      - key: VITE_API_URL
+        scope: BUILD_TIME
+        value: /api
