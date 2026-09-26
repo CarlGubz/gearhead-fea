@@ -1,0 +1,31 @@
+version: "3.9"
+
+services:
+  backend:
+    build: ./backend
+    container_name: webfea-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - webfea_data:/app/data
+    environment:
+      - DATABASE_URL=sqlite:///./data/webfea.db
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Points the built frontend at the backend's published host port.
+        # If you deploy behind a shared reverse proxy on one domain instead,
+        # change this to "/api" and route /api/* to the backend service.
+        VITE_API_URL: http://localhost:8000/api
+    container_name: webfea-frontend
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  webfea_data:

@@ -1,0 +1,131 @@
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: #0e1117;
+  color: #e6e6e6;
+}
+
+.app { display: flex; flex-direction: column; height: 100vh; }
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 18px;
+  background: #161b22;
+  border-bottom: 1px solid #262c36;
+}
+header h1 { font-size: 18px; margin: 0; }
+header .subtitle { color: #8a929e; font-size: 13px; }
+.badge { margin-left: auto; font-size: 12px; padding: 4px 10px; border-radius: 12px; }
+.badge.ok { background: #16362a; color: #6fdc9c; }
+.badge.warn { background: #3a2f16; color: #e8c56c; }
+
+.body { flex: 1; display: flex; overflow: hidden; }
+
+.sidebar {
+  width: 300px;
+  overflow-y: auto;
+  background: #12161c;
+  padding: 10px;
+  flex-shrink: 0;
+}
+.sidebar.left { border-right: 1px solid #262c36; }
+.sidebar.right { border-left: 1px solid #262c36; }
+
+.viewport { flex: 1; position: relative; }
+.empty-state {
+  display: flex; align-items: center; justify-content: center;
+  height: 100%; color: #8a929e; text-align: center; padding: 40px;
+}
+
+.panel {
+  background: #161b22;
+  border: 1px solid #262c36;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+.panel h3 { margin: 0 0 10px; font-size: 14px; color: #cdd6e0; }
+.panel h4 { margin: 10px 0 4px; font-size: 12px; color: #9aa4b2; }
+
+label { display: block; font-size: 12px; color: #9aa4b2; margin-bottom: 4px; }
+
+select, input[type="text"], input[type="number"] {
+  width: 100%;
+  background: #0e1117;
+  border: 1px solid #333b47;
+  color: #e6e6e6;
+  border-radius: 4px;
+  padding: 5px 7px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+input[type="range"] { width: 100%; }
+
+.field-row { margin-bottom: 8px; }
+.field-row label { display: inline-block; margin-right: 6px; }
+
+fieldset {
+  border: 1px solid #262c36;
+  border-radius: 6px;
+  margin-bottom: 10px;
+  padding: 8px;
+}
+fieldset legend { font-size: 12px; color: #9aa4b2; padding: 0 6px; }
+fieldset label { display: inline-block; margin-right: 10px; font-size: 12px; color: #cdd6e0; }
+
+button {
+  background: #2b3542;
+  color: #e6e6e6;
+  border: 1px solid #3a4552;
+  border-radius: 5px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 13px;
+}
+button:hover:not(:disabled) { background: #37424f; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button.primary { background: #2f6fed; border-color: #2f6fed; width: 100%; margin-top: 6px; }
+button.primary:hover:not(:disabled) { background: #4c82f0; }
+button.link { background: none; border: none; color: #e07a7a; padding: 0 0 0 8px; font-size: 12px; }
+
+.hint { font-size: 11px; color: #6c7583; margin: 4px 0 8px; }
+
+.project-list { list-style: none; padding: 0; margin: 6px 0 0; }
+.project-list li {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 6px 8px; border-radius: 4px; cursor: pointer; font-size: 13px;
+}
+.project-list li span { flex: 1; }
+.project-list li.active, .project-list li:hover { background: #1d2430; }
+
+.list-block ul { list-style: none; padding: 0; margin: 4px 0; }
+.list-block li {
+  font-size: 12px; padding: 4px 6px; border-radius: 4px; background: #0e1117;
+  margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center;
+}
+
+.job-status { margin-top: 10px; font-size: 13px; }
+.job-status .tag {
+  background: #263042; color: #9db4e0; font-size: 11px; padding: 2px 8px; border-radius: 10px; margin-left: 6px;
+}
+.progress-bar { height: 6px; background: #262c36; border-radius: 4px; overflow: hidden; margin: 6px 0; }
+.progress-fill { height: 100%; background: #2f6fed; transition: width 0.3s ease; }
+.error-log {
+  white-space: pre-wrap; font-size: 11px; background: #200f0f; color: #ec9a9a;
+  padding: 8px; border-radius: 4px; max-height: 200px; overflow: auto;
+}
+
+.legend {
+  position: absolute; bottom: 20px; right: 20px;
+  background: rgba(18, 22, 28, 0.85); border: 1px solid #262c36;
+  border-radius: 6px; padding: 8px 12px; font-size: 12px; width: 180px;
+}
+.legend-title { margin-bottom: 6px; color: #cdd6e0; }
+.legend-bar {
+  height: 10px; border-radius: 3px;
+  background: linear-gradient(to right, #000099, #0099ff, #00ff33, #ffff00, #ff0000);
+}
+.legend-labels { display: flex; justify-content: space-between; margin-top: 4px; color: #9aa4b2; }
