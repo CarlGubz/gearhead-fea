@@ -157,6 +157,8 @@ def parse_frd(path: str, n_nodes: int) -> Dict[str, np.ndarray]:
                 continue
 
     von_mises_nodal = np.zeros(n_nodes)
+    principal_max_nodal = np.zeros(n_nodes)
+    principal_min_nodal = np.zeros(n_nodes)
     for nid, s in stresses.items():
         sxx, syy, szz, sxy, syz, szx = s
         vm = np.sqrt(
@@ -164,8 +166,17 @@ def parse_frd(path: str, n_nodes: int) -> Dict[str, np.ndarray]:
             + 3 * (sxy ** 2 + syz ** 2 + szx ** 2)
         )
         von_mises_nodal[nid] = vm
+        tensor = np.array([[sxx, sxy, szx], [sxy, syy, syz], [szx, syz, szz]])
+        eigvals = np.linalg.eigvalsh(tensor)  # ascending: [S3, S2, S1]
+        principal_min_nodal[nid] = eigvals[0]
+        principal_max_nodal[nid] = eigvals[-1]
 
-    return {"displacements": displacements, "von_mises_nodal": von_mises_nodal}
+    return {
+        "displacements": displacements,
+        "von_mises_nodal": von_mises_nodal,
+        "principal_stress_max_nodal": principal_max_nodal,
+        "principal_stress_min_nodal": principal_min_nodal,
+    }
 
 
 def solve_with_calculix(

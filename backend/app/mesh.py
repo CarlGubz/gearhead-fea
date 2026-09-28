@@ -98,31 +98,42 @@ def tet_volume(coords: np.ndarray) -> float:
     return abs(np.dot(np.cross(b - a, c - a), d - a)) / 6.0
 
 
-def extract_surface_faces(elements: np.ndarray) -> np.ndarray:
+def extract_surface_faces(nodes: np.ndarray, elements: np.ndarray) -> np.ndarray:
     """
     Extract the outer boundary triangles of a tet mesh: any triangular face
     that belongs to exactly one tetrahedron is a surface (boundary) face.
-    Used for 3D rendering and for letting the user click faces to apply
-    boundary conditions / loads without rendering every internal tet face.
+    Each returned triangle is wound so its cross-product normal points
+    outward (away from the tetrahedron it came from) - used for 3D
+    rendering, face picking, and as the basis for pressure-load traction
+    direction (see solver.pressure_nodal_forces).
     """
     face_count: Dict[Tuple[int, int, int], int] = {}
-    face_orig: Dict[Tuple[int, int, int], List[int]] = {}
+    face_info: Dict[Tuple[int, int, int], Tuple[List[int], int]] = {}
 
     for tet in elements:
         tet = list(tet)
-        faces = [
-            (tet[0], tet[1], tet[2]),
-            (tet[0], tet[1], tet[3]),
-            (tet[0], tet[2], tet[3]),
-            (tet[1], tet[2], tet[3]),
+        candidates = [
+            ([tet[0], tet[1], tet[2]], tet[3]),
+            ([tet[0], tet[1], tet[3]], tet[2]),
+            ([tet[0], tet[2], tet[3]], tet[1]),
+            ([tet[1], tet[2], tet[3]], tet[0]),
         ]
-        for f in faces:
-            key = tuple(sorted(f))
+        for tri, opposite in candidates:
+            key = tuple(sorted(tri))
             face_count[key] = face_count.get(key, 0) + 1
-            if key not in face_orig:
-                face_orig[key] = list(f)
+            if key not in face_info:
+                face_info[key] = (tri, opposite)
 
-    surface = [face_orig[k] for k, cnt in face_count.items() if cnt == 1]
+    surface = []
+    for key, cnt in face_count.items():
+        if cnt != 1:
+            continue
+        tri, opposite = face_info[key]
+        p0, p1, p2, po = nodes[tri[0]], nodes[tri[1]], nodes[tri[2]], nodes[opposite]
+        normal = np.cross(p1 - p0, p2 - p0)
+        if np.dot(normal, po - p0) > 0:
+            tri = [tri[0], tri[2], tri[1]]  # flip winding so normal points outward
+        surface.append(tri)
     return np.array(surface, dtype=np.int64)
 
 

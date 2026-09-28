@@ -1,6 +1,6 @@
 import React, { useMemo, useRef } from "react";
 import { Canvas, useThree } from "@react-three/fiber";
-import { OrbitControls, Grid } from "@react-three/drei";
+import { OrbitControls, Grid, GizmoHelper, GizmoViewport } from "@react-three/drei";
 import * as THREE from "three";
 
 // Blue -> Cyan -> Green -> Yellow -> Red "jet-like" colormap, same convention
@@ -25,7 +25,7 @@ function colormap(t) {
   return [1, 0, 0];
 }
 
-function Mesh({ nodes, faces, displacements, field, deformScale, selectedNodes, onPickFace }) {
+function Mesh({ nodes, faces, displacements, field, deformScale, selectedNodes, selectedFaces, onPickFace }) {
   const geometry = useMemo(() => {
     if (!nodes?.length || !faces?.length) return null;
 
@@ -41,6 +41,7 @@ function Mesh({ nodes, faces, displacements, field, deformScale, selectedNodes, 
     }
 
     const nodeSelected = new Set(selectedNodes || []);
+    (selectedFaces || []).forEach((tri) => tri.forEach((n) => nodeSelected.add(n)));
 
     faces.forEach((tri, fi) => {
       tri.forEach((nodeIdx, vi) => {
@@ -83,7 +84,7 @@ function Mesh({ nodes, faces, displacements, field, deformScale, selectedNodes, 
     geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
     geo.computeVertexNormals();
     return geo;
-  }, [nodes, faces, displacements, field, deformScale, selectedNodes]);
+  }, [nodes, faces, displacements, field, deformScale, selectedNodes, selectedFaces]);
 
   const meshRef = useRef();
 
@@ -126,6 +127,11 @@ function FitCamera({ nodes }) {
   return null;
 }
 
+const GRID_COLORS = {
+  light: { cell: "#b9c0ca", section: "#8b93a1", bg: "linear-gradient(#f4f6f8, #c7ccd4)" },
+  dark: { cell: "#333333", section: "#555555", bg: "linear-gradient(#161b22, #05070a)" },
+};
+
 export default function Viewport3D({
   nodes,
   faces,
@@ -133,25 +139,65 @@ export default function Viewport3D({
   field,
   deformScale = 0,
   selectedNodes = [],
+  selectedFaces = [],
   onPickFace,
+  theme = "dark",
+  pickMode = "none",
+  setPickMode,
+  allowFacePick = false,
 }) {
+  const colors = GRID_COLORS[theme] || GRID_COLORS.dark;
+
   return (
-    <Canvas camera={{ fov: 45 }} style={{ background: "#0e1117" }}>
-      <ambientLight intensity={0.7} />
-      <directionalLight position={[5, 8, 5]} intensity={0.8} />
-      <directionalLight position={[-5, -3, -5]} intensity={0.3} />
-      <FitCamera nodes={nodes} />
-      <Mesh
-        nodes={nodes}
-        faces={faces}
-        displacements={displacements}
-        field={field}
-        deformScale={deformScale}
-        selectedNodes={selectedNodes}
-        onPickFace={onPickFace}
-      />
-      <Grid args={[20, 20]} position={[0, 0, 0]} cellColor="#333" sectionColor="#555" infiniteGrid fadeDistance={30} />
-      <OrbitControls makeDefault />
-    </Canvas>
+    <>
+      {setPickMode && (
+        <div className="viewport-toolbar">
+          <button
+            className={`toolbar-btn ${pickMode === "none" ? "active" : ""}`}
+            title="Orbit / pan / zoom (no selection)"
+            onClick={() => setPickMode("none")}
+          >
+            ⟲
+          </button>
+          <button
+            className={`toolbar-btn ${pickMode === "select" ? "active" : ""}`}
+            title="Select nodes (click a face to select its nodes; shift-click to add)"
+            onClick={() => setPickMode("select")}
+          >
+            ◆
+          </button>
+          {allowFacePick && (
+            <button
+              className={`toolbar-btn ${pickMode === "select-faces" ? "active" : ""}`}
+              title="Select faces (for pressure loads; shift-click to add)"
+              onClick={() => setPickMode("select-faces")}
+            >
+              ▤
+            </button>
+          )}
+        </div>
+      )}
+      <Canvas camera={{ fov: 45 }} style={{ background: colors.bg }}>
+        <ambientLight intensity={0.7} />
+        <directionalLight position={[5, 8, 5]} intensity={0.8} />
+        <directionalLight position={[-5, -3, -5]} intensity={0.3} />
+        <FitCamera nodes={nodes} />
+        <Mesh
+          nodes={nodes}
+          faces={faces}
+          displacements={displacements}
+          field={field}
+          deformScale={deformScale}
+          selectedNodes={selectedNodes}
+          selectedFaces={selectedFaces}
+          onPickFace={onPickFace}
+        />
+        <Grid args={[20, 20]} position={[0, 0, 0]} cellColor={colors.cell} sectionColor={colors.section} infiniteGrid fadeDistance={30} />
+        <GizmoHelper alignment="top-right" margin={[64, 64]}>
+          <GizmoViewport axisColors={["#e05a5a", "#5ac25a", "#4d8fe0"]} labelColor="white" />
+        </GizmoHelper>
+        <OrbitControls makeDefault />
+      </Canvas>
+    </>
   );
 }

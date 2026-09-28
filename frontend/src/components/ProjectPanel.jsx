@@ -4,8 +4,7 @@ export default function ProjectPanel({ projects, activeId, onSelect, onCreate, o
   const [name, setName] = useState("New Project");
 
   return (
-    <div className="panel">
-      <h3>Projects</h3>
+    <>
       <div className="field-row">
         <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Project name" />
         <button onClick={() => onCreate(name)}>+ New</button>
@@ -18,6 +17,6 @@ export default function ProjectPanel({ projects, activeId, onSelect, onCreate, o
           </li>
         ))}
       </ul>
-    </div>
+    </>
   );
 }

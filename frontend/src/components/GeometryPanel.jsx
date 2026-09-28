@@ -17,8 +17,7 @@ export default function GeometryPanel({ onGenerate }) {
   };
 
   return (
-    <div className="panel">
-      <h3>Geometry &amp; Mesh</h3>
+    <>
       <label>Primitive</label>
       <select value={shape} onChange={(e) => changeShape(e.target.value)}>
         <option value="box">Box</option>
@@ -56,6 +55,6 @@ export default function GeometryPanel({ onGenerate }) {
       <p className="hint">
         Tip: higher mesh density = smoother stress results but slower solves.
       </p>
-    </div>
+    </>
   );
 }

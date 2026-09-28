@@ -26,10 +26,14 @@ class Project(Base):
     elements = Column(JSON, default=list)
     surface_faces = Column(JSON, default=list)  # boundary triangles for picking/rendering
 
-    material = Column(JSON, default=dict)  # {name, E, nu, density}
+    material = Column(JSON, default=dict)  # {name, E, nu, density, conductivity, specific_heat}
 
     boundary_conditions = Column(JSON, default=list)  # list of BC dicts
     loads = Column(JSON, default=list)  # list of load dicts
+
+    analysis_type = Column(String, default="static")  # "static" | "modal" | "thermal"
+    n_modes = Column(Integer, default=6)  # number of modes for modal analysis
+    gravity = Column(JSON, default=lambda: {"enabled": False, "x": 0.0, "y": 0.0, "z": -9.81})
 
     jobs = relationship("Job", back_populates="project", cascade="all, delete-orphan")
 

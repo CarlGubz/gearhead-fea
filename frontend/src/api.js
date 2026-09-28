@@ -23,6 +23,12 @@ export const generatePrimitive = (id, shape, dims, divisions) =>
 export const setMaterial = (id, material) =>
   api.put(`/projects/${id}/material`, material).then((r) => r.data);
 
+export const setAnalysisType = (id, analysis_type, n_modes = 6) =>
+  api.put(`/projects/${id}/analysis-type`, { analysis_type, n_modes }).then((r) => r.data);
+
+export const setGravity = (id, gravity) =>
+  api.put(`/projects/${id}/gravity`, gravity).then((r) => r.data);
+
 export const addBC = (id, bc) => api.post(`/projects/${id}/bcs`, bc).then((r) => r.data);
 export const deleteBC = (id, bcId) =>
   api.delete(`/projects/${id}/bcs/${bcId}`).then((r) => r.data);

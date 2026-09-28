@@ -16,12 +16,42 @@ from typing import List
 
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 
 from . import models, schemas, mesh, calculix, jobs
 from .database import Base, engine, get_db
 
 Base.metadata.create_all(bind=engine)
+
+
+def _migrate_schema():
+    """
+    Minimal, dependency-free migration: `create_all` only creates tables
+    that don't exist yet, so a `projects` table from before analysis_type /
+    n_modes / gravity were added needs those columns backfilled by hand.
+    Safe to run on every startup (each step is a no-op once applied).
+    """
+    inspector = inspect(engine)
+    if "projects" not in inspector.get_table_names():
+        return
+    existing = {c["name"] for c in inspector.get_columns("projects")}
+    with engine.begin() as conn:
+        if "analysis_type" not in existing:
+            conn.execute(text("ALTER TABLE projects ADD COLUMN analysis_type VARCHAR"))
+            conn.execute(text("UPDATE projects SET analysis_type = 'static' WHERE analysis_type IS NULL"))
+        if "n_modes" not in existing:
+            conn.execute(text("ALTER TABLE projects ADD COLUMN n_modes INTEGER"))
+            conn.execute(text("UPDATE projects SET n_modes = 6 WHERE n_modes IS NULL"))
+        if "gravity" not in existing:
+            conn.execute(text("ALTER TABLE projects ADD COLUMN gravity JSON"))
+            conn.execute(text(
+                "UPDATE projects SET gravity = '{\"enabled\": false, \"x\": 0.0, \"y\": 0.0, \"z\": -9.81}' "
+                "WHERE gravity IS NULL"
+            ))
+
+
+_migrate_schema()
 
 app = FastAPI(title="WebFEA", description="Browser-based CAD/CAE FEA suite", version="1.0.0")
 
@@ -51,9 +81,15 @@ def create_project(payload: schemas.ProjectCreate, db: Session = Depends(get_db)
         nodes=[],
         elements=[],
         surface_faces=[],
-        material={"name": "Steel", "E": 210e9, "nu": 0.3, "density": 7850.0},
+        material={
+            "name": "Steel", "E": 210e9, "nu": 0.3, "density": 7850.0,
+            "conductivity": 50.0, "specific_heat": 490.0,
+        },
         boundary_conditions=[],
         loads=[],
+        analysis_type="static",
+        n_modes=6,
+        gravity={"enabled": False, "x": 0.0, "y": 0.0, "z": -9.81},
     )
     db.add(project)
     db.commit()
@@ -92,7 +128,7 @@ def generate_primitive(project_id: str, payload: schemas.PrimitiveMeshRequest, d
         raise HTTPException(404, "Project not found")
     try:
         nodes, elements = mesh.generate_primitive_mesh(payload.shape, payload.dims, payload.divisions)
-        faces = mesh.extract_surface_faces(elements)
+        faces = mesh.extract_surface_faces(nodes, elements)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(400, f"Mesh generation failed: {exc}")
 
@@ -118,7 +154,7 @@ def upload_custom_mesh(
         raise HTTPException(404, "Project not found")
     try:
         n, e = mesh.mesh_from_arrays(nodes, elements)
-        faces = mesh.extract_surface_faces(e)
+        faces = mesh.extract_surface_faces(n, e)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(400, f"Invalid mesh: {exc}")
 
@@ -139,6 +175,37 @@ def set_material(project_id: str, payload: schemas.MaterialUpdate, db: Session =
     if not project:
         raise HTTPException(404, "Project not found")
     project.material = payload.model_dump()
+    db.commit()
+    db.refresh(project)
+    return project
+
+
+# -------------------------------------------------------------- Analysis type
+@app.put("/api/projects/{project_id}/analysis-type", response_model=schemas.ProjectOut)
+def set_analysis_type(project_id: str, payload: schemas.AnalysisTypeUpdate, db: Session = Depends(get_db)):
+    project = db.get(models.Project, project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+    if payload.analysis_type not in ("static", "modal", "thermal"):
+        raise HTTPException(400, "analysis_type must be one of: static, modal, thermal")
+    if payload.analysis_type != project.analysis_type:
+        # BCs/loads have analysis-specific meaning (e.g. fixed support vs.
+        # fixed temperature) - clear them on switch, same as mesh regen.
+        project.boundary_conditions = []
+        project.loads = []
+    project.analysis_type = payload.analysis_type
+    project.n_modes = max(1, min(payload.n_modes, 50))
+    db.commit()
+    db.refresh(project)
+    return project
+
+
+@app.put("/api/projects/{project_id}/gravity", response_model=schemas.ProjectOut)
+def set_gravity(project_id: str, payload: schemas.GravityUpdate, db: Session = Depends(get_db)):
+    project = db.get(models.Project, project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+    project.gravity = payload.model_dump()
     db.commit()
     db.refresh(project)
     return project
