@@ -1,150 +1,163 @@
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
+import { Check, Num, Select, Vec3 } from "./fields.jsx";
+
+const MECH = ["static", "nonlinear", "modal", "buckling", "dynamic", "thermomech"];
+const THERMAL = ["thermal", "thermal_transient", "thermomech"];
+
+// id, label, group, family, what the selection must contain
+const KINDS = [
+  { id: "fixed", label: "Support · fixed (all directions)", group: "bc", fam: "mech", needs: "nodes" },
+  { id: "symmetry", label: "Support · symmetry plane", group: "bc", fam: "mech", needs: "nodes" },
+  { id: "displacement", label: "Support · prescribed displacement", group: "bc", fam: "mech", needs: "nodes" },
+  { id: "ref_bc", label: "Support · reference point", group: "bc", fam: "mech", needs: "ref" },
+  { id: "force", label: "Load · force on nodes", group: "load", fam: "mech", needs: "nodes", noModal: true },
+  { id: "pressure", label: "Load · pressure on faces", group: "load", fam: "mech", needs: "faces", noModal: true },
+  { id: "traction", label: "Load · traction vector on faces", group: "load", fam: "mech", needs: "faces", noModal: true },
+  { id: "ref_force", label: "Load · remote force / moment (reference point)", group: "load", fam: "mech", needs: "ref", noModal: true },
+  { id: "temperature", label: "Thermal · fixed temperature", group: "bc", fam: "thermal", needs: "nodes" },
+  { id: "heat_flux", label: "Thermal · heat source on nodes (W)", group: "load", fam: "thermal", needs: "nodes" },
+  { id: "surface_flux", label: "Thermal · surface heat flux (W/m²)", group: "load", fam: "thermal", needs: "faces" },
+  { id: "body_heat", label: "Thermal · volumetric heat (W/m³)", group: "load", fam: "thermal", needs: "none" },
+  { id: "convection", label: "Thermal · convection film", group: "load", fam: "thermal", needs: "faces" },
+  { id: "radiation", label: "Thermal · radiation to ambient", group: "load", fam: "thermal", needs: "faces" },
+];
+
+const AXES = ["X", "Y", "Z"];
+
+function describe(item) {
+  if (item.bc_type === "temperature") return `${item.node_ids.length} node(s), T = ${item.values?.[0]} °C`;
+  if (item.ref_id) return `reference point, dofs ${item.dofs.map((d) => ["x", "y", "z", "rx", "ry", "rz"][d]).join(",")}`;
+  if (item.dofs) return `${item.node_ids.length} node(s), dofs ${item.dofs.map((d) => AXES[d]).join(",")}${item.values?.some((v) => v) ? ` = ${item.values.join(", ")}` : ""}`;
+  const k = item.load_type;
+  const f = (item.faces || []).length;
+  if (k === "force") return `${item.node_ids.length} node(s), F = (${item.vector.map((v) => +v.toFixed(3)).join(", ")}) N`;
+  if (k === "pressure") return `${f} face(s), p = ${item.magnitude} Pa`;
+  if (k === "traction") return `${f} face(s), t = (${item.vector.join(", ")}) Pa`;
+  if (k === "ref_force") return `F = (${item.vector.join(", ")}) N, M = (${item.moment.join(", ")}) N·m`;
+  if (k === "heat_flux") return `${item.node_ids.length} node(s), Q = ${item.magnitude} W`;
+  if (k === "surface_flux") return `${f} face(s), q = ${item.magnitude} W/m²`;
+  if (k === "body_heat") return `q = ${item.magnitude} W/m³`;
+  if (k === "convection") return `${f} face(s), h = ${item.h}, T∞ = ${item.T_inf} °C`;
+  if (k === "radiation") return `${f} face(s), ε = ${item.emissivity}, T∞ = ${item.T_inf} °C`;
+  return "";
+}
 
 export default function BCLoadPanel({
-  analysisType,
-  selectedNodes,
-  selectedFaces,
-  boundaryConditions,
-  loads,
-  onAddBC,
-  onDeleteBC,
-  onAddLoad,
-  onDeleteLoad,
-  onClearSelection,
+  analysisType, selectedNodes, selectedFaces, boundaryConditions, loads, refPoints,
+  onAddBC, onDeleteBC, onAddLoad, onDeleteLoad, onMessage,
 }) {
-  const [fx, setFx] = useState(0);
-  const [fy, setFy] = useState(0);
-  const [fz, setFz] = useState(-1000);
-  const [fixX, setFixX] = useState(true);
-  const [fixY, setFixY] = useState(true);
-  const [fixZ, setFixZ] = useState(true);
-  const [pressure, setPressure] = useState(1000);
-  const [temperature, setTemperature] = useState(20);
-  const [heatFlux, setHeatFlux] = useState(10);
+  const kinds = useMemo(
+    () => KINDS.filter((k) => (k.fam === "mech" ? MECH : THERMAL).includes(analysisType) && !(k.noModal && analysisType === "modal")),
+    [analysisType]
+  );
+  const [kind, setKind] = useState(kinds[0].id);
+  const active = kinds.find((k) => k.id === kind) || kinds[0];
 
-  const dofs = [fixX, fixY, fixZ].reduce((acc, v, i) => (v ? [...acc, i] : acc), []);
-  const faceNodeCount = new Set((selectedFaces || []).flat()).size;
+  const [axis, setAxis] = useState("0");
+  const [dofOn, setDofOn] = useState([true, false, false, false, false, false]);
+  const [dofVal, setDofVal] = useState([0, 0, 0, 0, 0, 0]);
+  const [vec, setVec] = useState([0, 0, -1000]);
+  const [mom, setMom] = useState([0, 0, 0]);
+  const [mag, setMag] = useState(1000);
+  const [temp, setTemp] = useState(100);
+  const [h, setH] = useState(25);
+  const [tinf, setTinf] = useState(20);
+  const [eps, setEps] = useState(0.8);
+  const [refId, setRefId] = useState("");
+
+  const refs = refPoints || [];
+  const needText = { nodes: "Select nodes first (◆ tool or the Selection panel).", faces: "Select faces first (▤ tool).", ref: "Create a reference point first (Constraints panel).", none: "" }[active.needs];
+  const ready =
+    active.needs === "none" ||
+    (active.needs === "nodes" && (selectedNodes.length > 0 || selectedFaces.length > 0)) ||
+    (active.needs === "faces" && selectedFaces.length > 0) ||
+    (active.needs === "ref" && refs.length > 0);
+  const nodeIds = selectedNodes.length ? selectedNodes : Array.from(new Set((selectedFaces || []).flat()));
+  const rid = refId || refs[0]?.id;
+
+  const add = () => {
+    switch (active.id) {
+      case "fixed": return onAddBC({ name: "Fixed", bc_type: "displacement", node_ids: nodeIds, dofs: [0, 1, 2], values: [0, 0, 0] });
+      case "symmetry": return onAddBC({ name: `Symmetry ${AXES[+axis]}`, bc_type: "displacement", node_ids: nodeIds, dofs: [+axis], values: [0] });
+      case "displacement": {
+        const dofs = [0, 1, 2].filter((i) => dofOn[i]);
+        if (!dofs.length) return onMessage("Tick at least one direction.", "warn");
+        return onAddBC({ name: "Displacement", bc_type: "displacement", node_ids: nodeIds, dofs, values: dofs.map((i) => dofVal[i]) });
+      }
+      case "ref_bc": {
+        const dofs = [0, 1, 2, 3, 4, 5].filter((i) => dofOn[i]);
+        if (!dofs.length) return onMessage("Tick at least one degree of freedom.", "warn");
+        return onAddBC({ name: "Reference point BC", bc_type: "displacement", ref_id: rid, node_ids: [], dofs, values: dofs.map((i) => dofVal[i]) });
+      }
+      case "temperature": return onAddBC({ name: "Fixed temperature", bc_type: "temperature", node_ids: nodeIds, dofs: [0], values: [temp] });
+      case "force": return onAddLoad({ name: "Force", load_type: "force", node_ids: nodeIds, vector: vec });
+      case "pressure": return onAddLoad({ name: "Pressure", load_type: "pressure", faces: selectedFaces, magnitude: mag });
+      case "traction": return onAddLoad({ name: "Traction", load_type: "traction", faces: selectedFaces, vector: vec });
+      case "ref_force": return onAddLoad({ name: "Remote load", load_type: "ref_force", ref_id: rid, vector: vec, moment: mom });
+      case "heat_flux": return onAddLoad({ name: "Heat source", load_type: "heat_flux", node_ids: nodeIds, magnitude: mag });
+      case "surface_flux": return onAddLoad({ name: "Surface flux", load_type: "surface_flux", faces: selectedFaces, magnitude: mag });
+      case "body_heat": return onAddLoad({ name: "Body heat", load_type: "body_heat", magnitude: mag });
+      case "convection": return onAddLoad({ name: "Convection", load_type: "convection", faces: selectedFaces, h, T_inf: tinf });
+      case "radiation": return onAddLoad({ name: "Radiation", load_type: "radiation", faces: selectedFaces, emissivity: eps, T_inf: tinf });
+      default: return null;
+    }
+  };
+
+  const dofLabels = active.id === "ref_bc" ? ["ux", "uy", "uz", "rx", "ry", "rz"] : ["X", "Y", "Z"];
 
   return (
     <>
       <p className="hint">
-        {selectedNodes.length} node(s) / {(selectedFaces || []).length} face(s) selected.{" "}
-        {(selectedNodes.length > 0 || (selectedFaces || []).length > 0) && (
-          <button className="link" onClick={onClearSelection}>
-            clear
-          </button>
-        )}
+        {selectedNodes.length} node(s) / {selectedFaces.length} face(s) selected
       </p>
+      <Select label="Add" value={active.id} onChange={setKind} options={kinds.map((k) => ({ value: k.id, label: k.label }))} />
 
-      {analysisType === "thermal" ? (
-        <>
-          <fieldset>
-            <legend>Fix temperature of selected nodes</legend>
-            <div className="field-row">
-              <label>Temperature</label>
-              <input type="number" value={temperature} onChange={(e) => setTemperature(parseFloat(e.target.value))} />
-            </div>
-            <button
-              disabled={selectedNodes.length === 0}
-              onClick={() => onAddBC({ name: "Fixed Temperature", node_ids: selectedNodes, dofs: [0], values: [temperature] })}
-            >
-              Add Fixed Temperature
-            </button>
-          </fieldset>
-
-          <fieldset>
-            <legend>Heat source on selected nodes</legend>
-            <div className="field-row">
-              <label>Heat rate Q (W)</label>
-              <input type="number" value={heatFlux} onChange={(e) => setHeatFlux(parseFloat(e.target.value))} />
-            </div>
-            <button
-              disabled={selectedNodes.length === 0}
-              onClick={() =>
-                onAddLoad({ name: "Heat Flux", load_type: "heat_flux", node_ids: selectedNodes, magnitude: heatFlux })
-              }
-            >
-              Add Heat Flux
-            </button>
-          </fieldset>
-        </>
-      ) : (
-        <fieldset>
-          <legend>{analysisType === "modal" ? "Support selected nodes" : "Fix selected nodes"}</legend>
-          <label><input type="checkbox" checked={fixX} onChange={(e) => setFixX(e.target.checked)} /> X</label>
-          <label><input type="checkbox" checked={fixY} onChange={(e) => setFixY(e.target.checked)} /> Y</label>
-          <label><input type="checkbox" checked={fixZ} onChange={(e) => setFixZ(e.target.checked)} /> Z</label>
-          <button
-            disabled={selectedNodes.length === 0}
-            onClick={() => onAddBC({ name: "Fixed", node_ids: selectedNodes, dofs })}
-          >
-            Add Fixed Support
-          </button>
-        </fieldset>
+      {active.id === "symmetry" && (
+        <Select label="Plane normal" value={axis} onChange={setAxis}
+          options={[{ value: "0", label: "X (fixes ux)" }, { value: "1", label: "Y (fixes uy)" }, { value: "2", label: "Z (fixes uz)" }]} />
       )}
-
-      {analysisType === "static" && (
-        <>
-          <fieldset>
-            <legend>Apply force to selected nodes</legend>
-            <div className="field-row">
-              <label>Fx (N)</label>
-              <input type="number" value={fx} onChange={(e) => setFx(parseFloat(e.target.value))} />
+      {(active.id === "displacement" || active.id === "ref_bc") && (
+        <div className="dof-grid">
+          {dofLabels.map((l, i) => (
+            <div key={l}>
+              <Check label={l} checked={dofOn[i]} onChange={(on) => setDofOn(dofOn.map((x, k) => (k === i ? on : x)))} />
+              <Num value={dofVal[i]} disabled={!dofOn[i]} onCommit={(v) => setDofVal(dofVal.map((x, k) => (k === i ? v : x)))} />
             </div>
-            <div className="field-row">
-              <label>Fy (N)</label>
-              <input type="number" value={fy} onChange={(e) => setFy(parseFloat(e.target.value))} />
-            </div>
-            <div className="field-row">
-              <label>Fz (N)</label>
-              <input type="number" value={fz} onChange={(e) => setFz(parseFloat(e.target.value))} />
-            </div>
-            <button
-              disabled={selectedNodes.length === 0}
-              onClick={() => onAddLoad({ name: "Force", load_type: "force", node_ids: selectedNodes, vector: [fx, fy, fz] })}
-            >
-              Add Force
-            </button>
-          </fieldset>
-
-          <fieldset>
-            <legend>Apply pressure to selected faces</legend>
-            <div className="field-row">
-              <label>Pressure (Pa, + = inward)</label>
-              <input type="number" value={pressure} onChange={(e) => setPressure(parseFloat(e.target.value))} />
-            </div>
-            <button
-              disabled={(selectedFaces || []).length === 0}
-              onClick={() =>
-                onAddLoad({
-                  name: "Pressure",
-                  load_type: "pressure",
-                  node_ids: Array.from(new Set((selectedFaces || []).flat())),
-                  faces: selectedFaces,
-                  magnitude: pressure,
-                })
-              }
-            >
-              Add Pressure ({faceNodeCount} node(s) on {(selectedFaces || []).length} face(s))
-            </button>
-          </fieldset>
-        </>
+          ))}
+        </div>
       )}
+      {(active.id === "ref_bc" || active.id === "ref_force") && (
+        <Select label="Reference point" value={rid || ""} onChange={setRefId}
+          options={refs.length ? refs.map((r) => ({ value: r.id, label: r.name })) : [{ value: "", label: "(none)" }]} />
+      )}
+      {["force", "traction", "ref_force"].includes(active.id) && (
+        <Vec3 label={active.id === "traction" ? "Traction" : "Force"} unit={active.id === "traction" ? "Pa" : "N"} value={vec} onChange={setVec} />
+      )}
+      {active.id === "ref_force" && <Vec3 label="Moment" unit="N·m" value={mom} onChange={setMom} />}
+      {active.id === "pressure" && <Num label="Pressure (+ = into the surface)" unit="Pa" value={mag} onCommit={setMag} />}
+      {active.id === "heat_flux" && <Num label="Heat rate Q" unit="W" value={mag} onCommit={setMag} />}
+      {active.id === "surface_flux" && <Num label="Flux (+ = into the body)" unit="W/m²" value={mag} onCommit={setMag} />}
+      {active.id === "body_heat" && <Num label="Volumetric heat" unit="W/m³" value={mag} onCommit={setMag} />}
+      {active.id === "temperature" && <Num label="Temperature" unit="°C" value={temp} onCommit={setTemp} />}
+      {active.id === "convection" && <Num label="Film coefficient h" unit="W/(m²·K)" value={h} min={0} onCommit={setH} />}
+      {active.id === "radiation" && <Num label="Emissivity ε" value={eps} min={0} max={1} onCommit={setEps} />}
+      {(active.id === "convection" || active.id === "radiation") && <Num label="Ambient temperature T∞" unit="°C" value={tinf} onCommit={setTinf} />}
+
+      <button className="primary" disabled={!ready} onClick={add}>Add</button>
+      {!ready && needText && <p className="hint">{needText}</p>}
 
       <div className="list-block">
-        <h4>{analysisType === "thermal" ? "Fixed temperatures" : "Fixed supports"}</h4>
+        <h4>Supports &amp; temperatures</h4>
         {(boundaryConditions || []).length === 0 && <p className="hint">None yet.</p>}
         <ul>
           {(boundaryConditions || []).map((bc) => (
             <li key={bc.id}>
-              {bc.name} — {bc.node_ids.length} node(s)
-              {analysisType === "thermal" ? `, T=${bc.values?.[0]}` : `, dofs ${bc.dofs.join(",")}`}
+              <span><strong>{bc.name}</strong> — {describe(bc)}</span>
               <button className="link" onClick={() => onDeleteBC(bc.id)}>✕</button>
             </li>
           ))}
         </ul>
       </div>
-
       {analysisType !== "modal" && (
         <div className="list-block">
           <h4>Loads</h4>
@@ -152,10 +165,7 @@ export default function BCLoadPanel({
           <ul>
             {(loads || []).map((ld) => (
               <li key={ld.id}>
-                {ld.name} —{" "}
-                {ld.load_type === "force" && `${ld.node_ids.length} node(s), F=(${ld.vector.map((v) => v.toFixed(1)).join(", ")}) N`}
-                {ld.load_type === "pressure" && `${(ld.faces || []).length} face(s), P=${ld.magnitude} Pa`}
-                {ld.load_type === "heat_flux" && `${ld.node_ids.length} node(s), Q=${ld.magnitude} W`}
+                <span><strong>{ld.name}</strong> — {describe(ld)}</span>
                 <button className="link" onClick={() => onDeleteLoad(ld.id)}>✕</button>
               </li>
             ))}
