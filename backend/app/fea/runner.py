@@ -250,8 +250,13 @@ class Model:
         return o
 
     def mech_problem(self, T: Optional[np.ndarray] = None, Tref: float = 0.0) -> A.MechProblem:
-        return A.MechProblem(self.mesh, self.mats, self.cs, self.fixed_dofs(), self.mech_loads(), T, Tref,
+        prob = A.MechProblem(self.mesh, self.mats, self.cs, self.fixed_dofs(), self.mech_loads(), T, Tref,
                              self.solver_options())
+        prob.nlgeom = bool(self.settings.get("nlgeom"))
+        prob.finite_model = str(self.settings.get("finite_strain_model") or "svk")
+        if prob.nlgeom and prob.finite_model not in ("svk", "neohookean"):
+            raise ModelError("finite_strain_model must be svk or neohookean")
+        return prob
 
     # -------------------------------------------------------------- thermal
     def thermal_problem(self) -> A.ThermalProblem:
@@ -347,6 +352,10 @@ def _thermal_fields(model: Model, T: np.ndarray) -> Dict[str, np.ndarray]:
 
 def run(project: Dict[str, Any], progress: Progress = None) -> Dict[str, Any]:
     """Run the project's analysis. Returns {"results": dict, "log": str}."""
+    from .structural import is_structural
+    if is_structural(project.get("element_type")):
+        from . import struct_runner
+        return struct_runner.run(project, progress)
     model = Model(project)
     mesh, st = model.mesh, model.settings
     kind = model.analysis
@@ -358,11 +367,14 @@ def run(project: Dict[str, Any], progress: Progress = None) -> Dict[str, Any]:
         if not fixed:
             raise ModelError("Add at least one support (boundary condition) before running this analysis.")
 
+    nlgeom = bool(st.get("nlgeom"))
+    if nlgeom and kind not in ("static", "nonlinear"):
+        raise ModelError("Large deformation (NLGEOM) is supported in static and nonlinear analyses only. Switch it off or change the analysis type.")
     contact = model.contact_system()
     if contact is not None and kind not in ("static", "nonlinear"):
         raise ModelError("Contact is supported in static and nonlinear analyses only. Remove the contact pair or change the analysis type.")
 
-    if kind == "static" and contact is None:
+    if kind == "static" and contact is None and not nlgeom:
         prob = model.mech_problem(*_uniform_T(model))
         need_supports(prob.fixed)
         if not (prob.f_ext.any() or any(v != 0 for v in prob.fixed.values()) or prob.T is not None):
@@ -371,8 +383,8 @@ def run(project: Dict[str, Any], progress: Progress = None) -> Dict[str, Any]:
         log.append(out.log)
         return {"results": _static_results(model, out, "static"), "log": "\n".join(log)}
 
-    if kind == "nonlinear" or (kind == "static" and contact is not None):
-        if kind == "nonlinear" and not model.mats.plastic and contact is None:
+    if kind == "nonlinear" or (kind == "static" and (contact is not None or nlgeom)):
+        if kind == "nonlinear" and not model.mats.plastic and contact is None and not nlgeom:
             log.append("Note: the material has no yield stress, so the response is linear elastic.")
         prob = model.mech_problem(*_uniform_T(model))
         prob.contact = contact

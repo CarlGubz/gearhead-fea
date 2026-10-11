@@ -17,6 +17,7 @@ from scipy.sparse import linalg as spla
 
 from . import assembly as asm
 from .constraints import ConstraintSystem
+from .finite import FiniteStrainError, finite_assemble
 from .materials import Material, MaterialMap, as_map, principal
 from .linsolve import Geometry, LinearSolveError, SolverOptions, make_solver
 from .model import FEMesh
@@ -129,6 +130,8 @@ class MechProblem:
     T_ref: float = 0.0
     solver: SolverOptions = field(default_factory=SolverOptions)
     contact: Optional[object] = None  # ContactSystem (frictionless contact between parts)
+    nlgeom: bool = False              # large-deformation (total Lagrangian) kinematics
+    finite_model: str = "svk"          # 'svk' | 'neohookean' (only used with nlgeom)
 
 
 @dataclass
@@ -178,7 +181,8 @@ def static(prob: MechProblem, progress: Progress = None) -> StaticOut:
 def nonlinear_static(prob: MechProblem, increments: int = 10, max_iter: int = 30, tol: float = 1e-6,
                      progress: Progress = None) -> StaticOut:
     """
-    Incremental-iterative Newton-Raphson: J2 plasticity (small strain) and/or frictionless contact between parts.
+    Incremental-iterative Newton-Raphson: J2 plasticity (small strain), large deformation (total Lagrangian,
+    `prob.nlgeom`) and/or frictionless contact between parts.
     With contact the iteration only counts as converged when the set of nodes in contact stops changing.
     """
     mesh, mat, cs = prob.mesh, prob.mat, prob.cs
@@ -196,6 +200,18 @@ def nonlinear_static(prob: MechProblem, increments: int = 10, max_iter: int = 30
     size = float(np.ptp(mesh.nodes, axis=0).max()) or 1.0
     prev_active = np.array([], dtype=np.int64)
     cres = None
+    nlgeom = prob.nlgeom
+    if nlgeom and as_map(mat, mesh).plastic:
+        raise SolverError("Large-deformation analysis does not support plasticity yet. Remove the yield stress or switch NLGEOM off.")
+    if nlgeom and prob.T is not None:
+        raise SolverError("Large-deformation analysis does not support thermal strain yet. Remove the temperature change or switch NLGEOM off.")
+
+    def assemble(u_nodes, st, T_eff, want_K):
+        if nlgeom:
+            o = finite_assemble(mesh, mat, u_nodes, prob.finite_model, want_K)
+            o.state = st
+            return o
+        return asm.mech_assemble(mesh, mat, u_nodes, st, T_eff, prob.T_ref, want_K=want_K)
 
     while lam < 1.0 - 1e-12:
         step = min(dl, 1.0 - lam)
@@ -207,7 +223,12 @@ def nonlinear_static(prob: MechProblem, increments: int = 10, max_iter: int = 30
         active_before = prev_active
         for it in range(max_iter):
             u_nodes = cs.expand(trial)[:n3]
-            out = asm.mech_assemble(mesh, mat, u_nodes, state, T_eff, prob.T_ref, want_K=True)
+            try:
+                out = assemble(u_nodes, state, T_eff, True)
+            except FiniteStrainError as exc:
+                if step <= 1e-4 * 2:
+                    raise SolverError(str(exc)) from exc
+                break                                  # trial iterate inverted an element: cut the increment back
             fint_red = cs.reduce_vector(out.fint)
             r = target * f_red_full - fint_red
             norms = [np.linalg.norm(target * f_red_full), np.linalg.norm(fint_red), 1e-30]
@@ -238,6 +259,8 @@ def nonlinear_static(prob: MechProblem, increments: int = 10, max_iter: int = 30
                                   "or a body is not held in place): " + str(exc)) from exc
             trial[free] += du
         total_iters += it + 1
+        if not converged and out is None:
+            raise SolverError("The first iteration of the analysis failed (inverted element).")
         if converged:
             state = out.state
             u_red = trial
@@ -254,10 +277,11 @@ def nonlinear_static(prob: MechProblem, increments: int = 10, max_iter: int = 30
                     f"The nonlinear solution did not converge near load factor {lam:.3f}"
                     + (" (contact chattering or an unsupported body?). Add supports that hold every body, "
                        "lower the penalty factor, or use more increments." if contact is not None
+                       else " (buckling or an element inverted?). Reduce the load or use more increments." if nlgeom
                        else " (plastic collapse?). Reduce the load or increase the hardening modulus."))
     u_full = cs.expand(u_red)
     u = u_full[:n3]
-    final = asm.mech_assemble(mesh, mat, u, state, prob.T, prob.T_ref, want_K=False)
+    final = assemble(u, state, prob.T, False)
     fc_final = None
     contact_out = None
     if contact is not None:
@@ -268,7 +292,8 @@ def nonlinear_static(prob: MechProblem, increments: int = 10, max_iter: int = 30
             "max_penetration": cres.max_penetration, "total_force": cres.total_force, "force": cres.force,
         }
     plastic = as_map(mat, mesh).plastic
-    text = f"Nonlinear static: {total_iters} Newton iterations\n" + "\n".join(log[-12:])
+    head = "Nonlinear static" + (f" (large deformation, {prob.finite_model})" if nlgeom else "")
+    text = f"{head}: {total_iters} Newton iterations\n" + "\n".join(log[-12:])
     if contact_out is not None:
         text += (f"\nContact: {contact_out['active']} node(s) in contact, max penetration {contact_out['max_penetration']:.3g} m, "
                  f"total normal force {contact_out['total_force']:.6g} N")

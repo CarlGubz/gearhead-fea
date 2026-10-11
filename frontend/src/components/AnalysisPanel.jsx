@@ -51,7 +51,9 @@ function HistoryNodes({ value, onChange }) {
   );
 }
 
-export default function AnalysisPanel({ analysisType, settings, gravity, isPro, onChangeType, onSettings, onGravity }) {
+const STRUCT_ANALYSES = ["static", "modal", "buckling", "dynamic"];
+
+export default function AnalysisPanel({ analysisType, settings, gravity, isPro, onChangeType, onSettings, onGravity, structural }) {
   const st = settings || {};
   const [g, setG] = useState(gravity || { enabled: false, x: 0, y: 0, z: -9.81 });
   useEffect(() => setG(gravity || { enabled: false, x: 0, y: 0, z: -9.81 }), [gravity]);
@@ -64,9 +66,12 @@ export default function AnalysisPanel({ analysisType, settings, gravity, isPro, 
   return (
     <>
       <Select label="Analysis type" value={kind} onChange={onChangeType}
-        options={ANALYSES.map((a) => ({ value: a.value, label: a.label + (a.free || isPro ? "" : " — Pro") }))} />
+        options={ANALYSES.filter((a) => !structural || STRUCT_ANALYSES.includes(a.value))
+          .map((a) => ({ value: a.value, label: a.label + (a.free || isPro ? "" : " — Pro") }))} />
       <p className="hint">{HINTS[kind]}</p>
-      {kind !== "modal" && kind !== "buckling" && (
+      {structural && kind === "buckling" && <p className="hint">Buckling is available for truss and beam models.</p>}
+      {structural && kind === "modal" && <p className="hint">Add point masses (Loads) for spring–mass systems.</p>}
+      {!structural && kind !== "modal" && kind !== "buckling" && (
         <Select label="Linear solver" value={st.linear_solver || "auto"} onChange={(v) => onSettings({ linear_solver: v })}
           options={[{ value: "auto", label: "Automatic (direct, iterative for very large models)" },
             { value: "direct", label: "Direct (sparse LU)" }, { value: "iterative", label: "Iterative (PCG + Schwarz)" }]} />
@@ -76,11 +81,24 @@ export default function AnalysisPanel({ analysisType, settings, gravity, isPro, 
         <Num label="Number of modes" value={st.n_modes ?? 6} min={1} max={kind === "buckling" ? 20 : 50} step="1"
           onCommit={(v) => onSettings({ n_modes: Math.round(v) })} />
       )}
-      {kind === "nonlinear" && (
+      {!structural && (kind === "static" || kind === "nonlinear") && (
+        <>
+          <Check label="Large deformation (NLGEOM)" checked={!!st.nlgeom} onChange={(on) => onSettings({ nlgeom: on })} />
+          {st.nlgeom && (
+            <>
+              <Select label="Material model" value={st.finite_strain_model || "svk"} onChange={(v) => onSettings({ finite_strain_model: v })}
+                options={[{ value: "svk", label: "Saint Venant–Kirchhoff (large rotations, moderate strain)" },
+                  { value: "neohookean", label: "Neo-Hookean (large strain, rubber-like)" }]} />
+              <p className="hint">Elastic only (no plasticity or temperature change); loads do not follow the rotation.</p>
+            </>
+          )}
+        </>
+      )}
+      {!structural && (kind === "nonlinear" || (kind === "static" && st.nlgeom)) && (
         <Num label="Load increments" value={st.increments ?? 10} min={1} max={200} step="1"
           onCommit={(v) => onSettings({ increments: Math.round(v) })} />
       )}
-      {(kind === "static" || kind === "nonlinear") && (
+      {!structural && (kind === "static" || kind === "nonlinear") && (
         <>
           <Check label="Apply uniform temperature change" checked={st.uniform_temperature !== undefined}
             onChange={(on) => onSettings(on ? { uniform_temperature: 20, reference_temperature: st.reference_temperature ?? 20 } : { clear: ["uniform_temperature"] })} />

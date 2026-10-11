@@ -7,6 +7,7 @@ import Viewport3D from "../components/Viewport3D.jsx";
 import GeometryPanel from "../components/GeometryPanel.jsx";
 import MaterialPanel from "../components/MaterialPanel.jsx";
 import PartsPanel from "../components/PartsPanel.jsx";
+import StructuralPanel from "../components/StructuralPanel.jsx";
 import AnalysisPanel from "../components/AnalysisPanel.jsx";
 import BCLoadPanel from "../components/BCLoadPanel.jsx";
 import ConstraintPanel from "../components/ConstraintPanel.jsx";
@@ -17,8 +18,8 @@ import MessagesPanel from "../components/MessagesPanel.jsx";
 import Legend from "../components/Legend.jsx";
 import TreeSection from "../components/TreeSection.jsx";
 import {
-  autoScale, boundingBox, buildDisplay, defaultField, download, facesByAngle, fmt, minMax,
-  resultsToCSV, resultsToVTK, surfaceNodeIds,
+  autoScale, boundingBox, buildDisplay, buildTubeView, defaultField, download, facesByAngle, fmt, isLineElement, isStructural,
+  minMax, resultsToCSV, resultsToVTK, surfaceNodeIds,
 } from "../components/utils.js";
 import * as api from "../api.js";
 
@@ -247,6 +248,24 @@ export default function Workspace() {
     if (p) { clearSel(); notify(`Added part “${p.parts[p.parts.length - 1].name}”. The mesh now has ${p.nodes.length} nodes.`); }
   };
 
+  const handleImportCad = async (file, opts) => {
+    notify(`Meshing ${file.name}… this can take up to a minute.`);
+    const p = await mutate(api.importCad(activeId, file, opts), { reload: true });
+    if (p) { clearSel(); setViewName("iso"); notify(`Imported ${file.name}: ${p.parts.length} part(s), ${p.nodes.length} nodes, ${p.elements.length} ${p.element_type} elements.`); }
+  };
+  const handleGenerateStructural = async (body) => {
+    const p = await mutate(api.generateStructural(activeId, body), { reload: true });
+    if (p) { clearSel(); setViewName("iso"); notify(`Created ${p.nodes.length} nodes, ${p.elements.length} ${p.element_type} elements.`); }
+  };
+  const handleAppendStructural = async (body) => {
+    const p = await mutate(api.appendStructural(activeId, body), { reload: true });
+    if (p) { clearSel(); notify(`Added part “${p.parts[p.parts.length - 1].name}” (${p.elements.length} elements in total).`); }
+  };
+  const handleCustomStructural = async (body) => {
+    const p = await mutate(api.customStructural(activeId, body), { reload: true });
+    if (p) { clearSel(); setViewName("iso"); notify(`Created ${p.nodes.length} nodes, ${p.elements.length} ${p.element_type} elements.`); }
+  };
+
   /* ------------------------------------------------------ materials & parts */
   const handleMaterialUpdate = (id, m) => mutate(id === "default" ? api.setMaterial(activeId, m) : api.updateMaterial(activeId, id, m));
   const handleMaterialAdd = (m) => mutate(api.addMaterial(activeId, m));
@@ -305,7 +324,8 @@ export default function Workspace() {
   }, []);
 
   /* --------------------------------------------------------------- picking */
-  const handlePickFace = (tri, additive, faceIdx) => {
+  const handlePickFace = (rawTri, additive, faceIdx) => {
+    const tri = tube ? Array.from(new Set(rawTri.map((v) => tube.baseOf[v]))) : rawTri;
     if (pickMode === "select") {
       setSelectedFaces([]);
       setSelectedNodes((prev) => {
@@ -379,9 +399,34 @@ export default function Workspace() {
   };
 
   /* ------------------------------------------------------- viewport helpers */
+  const structuralType = isStructural(project?.element_type) ? project.element_type : null;
+  const lineModel = isLineElement(project?.element_type);
+  const tube = useMemo(() => {
+    if (!lineModel || !project?.elements?.length) return null;
+    const partOf = new Int32Array(project.elements.length);
+    (project.parts || []).forEach((p, k) => partOf.fill(k, p.elem_start, p.elem_end));
+    const diag = Math.max(Math.hypot(...boundingBox(project.nodes).size), 1e-6);
+    const thin = project.element_type === "SPRING2" ? 0.5 : 1;
+    return buildTubeView(project.nodes, project.elements, partOf, 0.012 * diag * thin);
+  }, [lineModel, project?.nodes, project?.elements, project?.parts, project?.element_type]);
+  const viewNodes = tube ? tube.nodes : project?.nodes;
+  const toView = useCallback((arr) => {
+    if (!tube || !arr) return arr;
+    const out = new Array(tube.baseOf.length);
+    for (let v = 0; v < out.length; v++) out[v] = arr[tube.baseOf[v]];
+    return out;
+  }, [tube]);
+  const viewDisp = useMemo(() => toView(display.disp), [toView, display.disp]);
+  const viewField = useMemo(() => toView(display.field), [toView, display.field]);
+  const selNodesView = useMemo(
+    () => (tube ? selectedNodes.flatMap((n) => [n, ...(tube.ringsOf[n] || [])]) : selectedNodes), [tube, selectedNodes]);
+  const selectionFaces = useMemo(
+    () => (lineModel ? (project?.elements || []).map(([a, b]) => [a, b, b]) : project?.surface_faces || []),
+    [lineModel, project?.elements, project?.surface_faces]);
+
   const { visibleFaces, visIdx, faceParts } = useMemo(() => {
-    const faces = project?.surface_faces || [];
-    const owner = project?.surface_parts || [];
+    const faces = tube ? tube.faces : project?.surface_faces || [];
+    const owner = tube ? tube.faceParts : project?.surface_parts || [];
     const plist = project?.parts || [];
     if (!hiddenParts.size) return { visibleFaces: faces, visIdx: faces.map((_, i) => i), faceParts: owner };
     const vf = [], vi = [], fp = [];
@@ -390,8 +435,9 @@ export default function Workspace() {
       if (!hiddenParts.has(pid)) { vf.push(t); vi.push(i); fp.push(owner[i] ?? 0); }
     });
     return { visibleFaces: vf, visIdx: vi, faceParts: fp };
-  }, [project?.surface_faces, project?.surface_parts, project?.parts, hiddenParts]);
-  const surfaceSet = useMemo(() => new Set(surfaceNodeIds(visibleFaces)), [visibleFaces]);
+  }, [tube, project?.surface_faces, project?.surface_parts, project?.parts, hiddenParts]);
+  const surfaceSet = useMemo(
+    () => new Set(lineModel ? (project?.elements || []).flat() : surfaceNodeIds(visibleFaces)), [lineModel, project?.elements, visibleFaces]);
   const markers = useMemo(() => {
     if (!project) return [];
     const pick = (ids) => Array.from(new Set(ids)).filter((n) => surfaceSet.has(n)).slice(0, 4000);
@@ -448,14 +494,20 @@ export default function Workspace() {
               <TreeSection icon="02" title="Geometry & Mesh" defaultOpen={!hasMesh}>
                 <GeometryPanel elementType={project.element_type} quality={quality} hasMesh={hasMesh}
                   materials={project.materials} defaultMaterial={project.material}
-                  onGenerate={handleGenerate} onAppend={handleAppend} onImport={handleImportMesh} />
+                  onGenerate={handleGenerate} onAppend={handleAppend} onImport={handleImportMesh} onImportCad={handleImportCad} />
+              </TreeSection>
+            )}
+            {project && (
+              <TreeSection icon="02" title="Beams, trusses, shells, springs" badge={structuralType} defaultOpen={!!structuralType}>
+                <StructuralPanel project={project} hasMesh={hasMesh} onGenerate={handleGenerateStructural}
+                  onAppend={handleAppendStructural} onCustom={handleCustomStructural} onMessage={notify} />
               </TreeSection>
             )}
             {hasMesh && (
               <TreeSection icon="03" title="Parts" badge={project.parts?.length || null} defaultOpen={(project.parts?.length || 0) > 1}>
                 <PartsPanel parts={project.parts} defaultMaterial={project.material} materials={project.materials}
                   hidden={hiddenParts} onToggle={togglePart} onUpdate={handlePartUpdate}
-                  onMove={handlePartMove} onDelete={handlePartDelete} />
+                  onMove={handlePartMove} onDelete={handlePartDelete} structuralType={structuralType} />
               </TreeSection>
             )}
             {project && (
@@ -467,12 +519,13 @@ export default function Workspace() {
             {project && (
               <TreeSection icon="04" title="Analysis" badge={analysisType} defaultOpen>
                 <AnalysisPanel analysisType={analysisType} settings={project.settings} gravity={project.gravity} isPro={isPro}
-                  onChangeType={handleType} onSettings={handleSettings} onGravity={(g) => mutate(api.setGravity(activeId, g))} />
+                  onChangeType={handleType} onSettings={handleSettings} onGravity={(g) => mutate(api.setGravity(activeId, g))}
+                  structural={!!structuralType} />
               </TreeSection>
             )}
             {hasMesh && (
               <TreeSection icon="05" title="Selection & sets" badge={selectedNodes.length + selectedFaces.length || null} defaultOpen={false}>
-                <SelectionPanel nodes={project.nodes} faces={project.surface_faces} selectedNodes={selectedNodes}
+                <SelectionPanel nodes={project.nodes} faces={selectionFaces} selectedNodes={selectedNodes}
                   selectedFaces={selectedFaces} setSelectedNodes={setSelectedNodes} setSelectedFaces={setSelectedFaces}
                   angle={angle} setAngle={setAngle} sets={project.node_sets}
                   onSaveSet={(name, kind, ids) => mutate(api.addNodeSet(activeId, { name, kind, ids }))}
@@ -485,13 +538,14 @@ export default function Workspace() {
         <main className="viewport">
           {hasMesh ? (
             <Viewport3D
-              nodes={project.nodes} faces={visibleFaces} faceParts={faceParts} displacements={display.disp} field={display.field}
+              nodes={viewNodes} faces={visibleFaces} faceParts={faceParts} displacements={viewDisp} field={viewField}
               range={range} deformScale={view.deformScale} animate={view.animate} oscillate={oscillate}
               showEdges={view.showEdges} showUndeformed={view.showUndeformed} showMinMax={view.showMinMax}
-              clip={view.clip} selectedNodes={selectedNodes} selectedFaces={selectedFaces} onPickFace={handlePickFace}
-              probeMode={view.probeMode && !!display.field} onProbe={setProbeNode} probeNode={probeNode}
+              clip={view.clip} selectedNodes={selNodesView} selectedFaces={selectedFaces} onPickFace={handlePickFace}
+              probeMode={view.probeMode && !!display.field} onProbe={(v) => setProbeNode(tube ? tube.baseOf[v] : v)} probeNode={probeNode}
+              pickNearest={lineModel} allowFacePick={!lineModel}
               markers={results ? [] : markers} refPoints={project.reference_points || []} theme={theme} pickMode={pickMode}
-              setPickMode={(m) => { setPickMode(m); setView({ probeMode: false }); }} allowFacePick
+              setPickMode={(m) => { setPickMode(m); setView({ probeMode: false }); }}
               viewCommand={viewCommand} setView={setViewName} onApi={(a) => { viewApi.current = a; }}
             />
           ) : (
@@ -506,11 +560,11 @@ export default function Workspace() {
               <TreeSection icon="06" title="Supports & loads" badge={loadsCount || null} defaultOpen>
                 <BCLoadPanel analysisType={analysisType} selectedNodes={selectedNodes} selectedFaces={selectedFaces}
                   boundaryConditions={project.boundary_conditions} loads={project.loads} refPoints={project.reference_points}
-                  onAddBC={handleAddBC} onDeleteBC={(id) => mutate(api.deleteBC(activeId, id))}
+                  structuralType={structuralType} parts={project.parts} onAddBC={handleAddBC} onDeleteBC={(id) => mutate(api.deleteBC(activeId, id))}
                   onAddLoad={handleAddLoad} onDeleteLoad={(id) => mutate(api.deleteLoad(activeId, id))} onMessage={notify} />
               </TreeSection>
             )}
-            {hasMesh && (
+            {hasMesh && !structuralType && (
               <TreeSection icon="07" title="Constraints" badge={(project.constraints?.length || 0) + (project.reference_points?.length || 0) || null} defaultOpen={false}>
                 <ConstraintPanel nodes={project.nodes} selectedNodes={selectedNodes} selectedFaces={selectedFaces} parts={project.parts}
                   refPoints={project.reference_points} constraints={project.constraints} sets={project.node_sets}

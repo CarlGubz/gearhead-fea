@@ -43,6 +43,31 @@ class MaterialItem(MaterialUpdate):
 class PartUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=60)
     material_id: Optional[str] = None
+    section: Optional[Dict[str, Any]] = None     # structural parts: beam/shell/truss/spring section properties
+
+
+class StructuralMeshRequest(BaseModel):
+    """Generate a structural model: kind = line | portal | plate | cylinder; element_type = B31 | T3D2 | SPRING2 | S4."""
+    kind: str
+    dims: Dict[str, float] = {}
+    divisions: int = Field(default=4, ge=1, le=200)
+    element_type: str = "B31"
+    section: Optional[Dict[str, Any]] = None
+    material_id: Optional[str] = None
+
+
+class AppendStructuralRequest(StructuralMeshRequest):
+    offset: List[float] = [0.0, 0.0, 0.0]
+    name: Optional[str] = Field(default=None, max_length=60)
+    merge: bool = True            # join nodes that coincide with existing nodes (needed to connect members)
+
+
+class CustomStructuralMesh(BaseModel):
+    """Arbitrary truss / frame / spring layout: node coordinates and 2-node connectivity (or 4-node shells)."""
+    nodes: List[List[float]]
+    elements: List[List[int]]
+    element_type: str
+    section: Optional[Dict[str, Any]] = None
 
 
 class TranslateRequest(BaseModel):
@@ -76,6 +101,9 @@ class Load(BaseModel):
       body_heat     `magnitude` [W/m^3] in the whole volume
       convection    `faces` + `h` [W/m^2K] + `T_inf`
       radiation     `faces` + `emissivity` + `T_inf`
+      line_load     structural: `vector` [N/m] on the beams of `part_id` (all beams if omitted)
+      point_mass    structural: `magnitude` [kg] lumped at each of node_ids (modal / dynamic analyses and gravity)
+    A `force` load on a structural model may also carry a `moment` [N m] (split over node_ids like the force).
     """
     id: Optional[str] = None
     name: str = "Force"
@@ -89,6 +117,7 @@ class Load(BaseModel):
     T_inf: Optional[float] = None
     emissivity: Optional[float] = None
     ref_id: Optional[str] = None
+    part_id: Optional[str] = None      # line_load: the part whose beams carry the load (all beams if omitted)
 
 
 class GravityUpdate(BaseModel):
@@ -119,6 +148,8 @@ class SettingsUpdate(BaseModel):
     linear_solver: Optional[str] = None
     auto_threshold: Optional[int] = Field(default=None, ge=1000)
     solver_tolerance: Optional[float] = Field(default=None, gt=0, le=1e-2)
+    nlgeom: Optional[bool] = None
+    finite_strain_model: Optional[str] = None
     rayleigh_alpha: Optional[float] = Field(default=None, ge=0)
     rayleigh_beta: Optional[float] = Field(default=None, ge=0)
     history_nodes: Optional[List[int]] = None
@@ -131,6 +162,13 @@ class SettingsUpdate(BaseModel):
     def _solver(cls, v):
         if v not in (None, "auto", "direct", "iterative"):
             raise ValueError("linear_solver must be 'auto', 'direct' or 'iterative'")
+        return v
+
+    @field_validator("finite_strain_model")
+    @classmethod
+    def _fsm(cls, v):
+        if v not in (None, "svk", "neohookean"):
+            raise ValueError("finite_strain_model must be 'svk' or 'neohookean'")
         return v
 
     @field_validator("thermal_mode")

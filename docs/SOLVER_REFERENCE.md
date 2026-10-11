@@ -33,6 +33,7 @@ update with the **consistent algorithmic tangent** so the global Newton converge
 |---|---|---|
 | `static` | `K u = f`, optional uniform ΔT (thermal pre-strain), gravity, centrifugal, pressure, traction, nodal & remote loads | u, reactions, σ, ε, von Mises, Tresca, principal, strain energy |
 | `nonlinear` | incremental load steps, Newton–Raphson with J2 plasticity, automatic increment cut-back (down to 1e-4) | + equivalent plastic strain |
+| `static` / `nonlinear` + `nlgeom` | total Lagrangian large deformation (Saint Venant–Kirchhoff or Neo-Hookean), elastic; see `NLGEOM_STRUCTURAL_CAD.md` | Cauchy stress, Green–Lagrange strain |
 | `modal` | `K φ = ω² M φ`, shift-invert Lanczos (ARPACK); with no supports → free-free with 6 rigid-body modes | frequencies (Hz), mode shapes |
 | `buckling` | linear eigenvalue: `(K + λ K_σ)φ = 0` using the static stress for the reference load | load factors λ, shapes; refuses tension-only loads with a clear message |
 | `dynamic` | implicit Newmark-β (β=¼, γ=½), Rayleigh damping `C=αM+βK`, amplitude curves (step/ramp/sine/pulse), one LU factorisation | ≤50 displacement frames, history at chosen nodes, stresses at the peak frame |
@@ -90,6 +91,6 @@ Beyond ~150k DOFs a direct solver becomes memory-bound; the default `auto` setti
 80,000 free DOFs (173k equations in about 40 s). See `UNDO_ITERATIVE_CONTACT.md`.
 
 ## 10. Not implemented (see the plan for the full matrix)
-Friction and large-sliding contact (frictionless node-to-surface penalty contact between parts exists in static/nonlinear analyses); large-deformation (`NLGEOM`) analysis; hyperelastic/creep/viscoplastic materials; shell, beam, truss and spring
+Friction and large-sliding contact (frictionless node-to-surface penalty contact between parts exists in static/nonlinear analyses); large deformation combined with plasticity, creep/viscoplastic materials; large-deformation pressure that follows the surface; mixed beam + shell models, tied or contacting structural parts
 elements; orthotropic or temperature-dependent materials; multiple materials/parts per model; coupled thermo-mechanical solve
-(sequential only); modal dynamics / steady-state dynamics / random response; CAD import (STEP/IGES/STL).
+(sequential only); modal dynamics / steady-state dynamics / random response; CAD healing and hex meshing of CAD (STEP / IGES / STL import itself exists, see `NLGEOM_STRUCTURAL_CAD.md`).

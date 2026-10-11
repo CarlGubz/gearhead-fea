@@ -35,8 +35,10 @@ explicit roadmap so nothing is implied that does not exist.
 | `*RIGID BODY` / `*MPC` (reference point), `*TIE` | **Delivered** (rigid body via reference point; tie by node-to-face projection) |
 | `*CONTACT PAIR` (frictionless, penalty, between parts) | **Delivered** (static/nonlinear; no friction) |
 | Friction, large sliding, self-contact | Roadmap |
-| `NLGEOM` (large deformation), hyperelasticity, creep, viscoplasticity | Roadmap |
-| Shell (S4/S8), beam (B31/B32), truss, spring/dashpot elements | Roadmap |
+| `NLGEOM` (large deformation, SVK + Neo-Hookean, elastic) | **Delivered** (solids; no plasticity) |
+| Creep, viscoplasticity | Roadmap |
+| Truss (T3D2), beam (B31, Timoshenko), shell (S4, MITC4), spring/dashpot (SPRING2) | **Delivered** (separate 6-DOF model class) |
+| S8 / B32 higher-order structural elements, shell-solid coupling | Roadmap |
 | `*COUPLED TEMPERATURE-DISPLACEMENT`, cyclic symmetry, `*STEADY STATE DYNAMICS`, random response, `*MODAL DYNAMIC` | Roadmap |
 | Orthotropic/anisotropic, temperature-dependent material data | Roadmap |
 | Iterative solver for very large models | **Delivered** (Schwarz-preconditioned CG, automatic above 80k DOFs) |
@@ -49,11 +51,12 @@ Legend: ✅ delivered here · 🟡 partly · 🗺️ roadmap (not built).
 |---|---|---|
 | **Geometry** | Primitives box/cylinder/sphere | ✅ (existing) |
 | | New primitives: tube, plate with hole, L-bracket | ✅ |
-| | STEP/IGES/STL import (needs a B-rep kernel) | 🗺️ |
+| | STEP/IGES/STL import (Gmsh / OpenCASCADE) | ✅ |
 | | Import mesh: Abaqus/CalculiX `.inp` | ✅ |
 | **Mesh** | Element order linear/quadratic, hex or tet | ✅ (hex only for box/L-bracket-aligned grids) |
 | | Mesh density control, mesh statistics & quality (volume, Jacobian, aspect) | ✅ |
-| | Gmsh/Netgen meshing of arbitrary CAD, mesh refinement fields | 🗺️ |
+| | Gmsh meshing of arbitrary CAD (Tet4/Tet10) | ✅ |
+| | Mesh refinement fields, hex meshing of CAD | 🗺️ |
 | **FE model** | Material: elastic, density, thermal expansion, conductivity, specific heat, plasticity | ✅ |
 | | Material library (more presets) | ✅ |
 | | Multiple parts and a material library (per-part materials), part move/hide/delete | ✅ (see `PARTS_AND_MATERIALS.md`) |

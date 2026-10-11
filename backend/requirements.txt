@@ -10,3 +10,4 @@ aiofiles
 argon2-cffi
 psycopg[binary]
 httpx
+gmsh

@@ -10,6 +10,7 @@ function Summary({ r }) {
   const t = r.analysis_type;
   if (r.max_displacement !== undefined) rows.push(["Max displacement", `${fmt(r.max_displacement)} m`]);
   if (r.max_von_mises !== undefined) rows.push(["Max von Mises", `${fmt(r.max_von_mises / 1e6)} MPa`]);
+  if (r.max_rotation !== undefined) rows.push(["Max rotation", `${fmt(r.max_rotation)} rad`]);
   if (r.max_plastic_strain !== undefined) rows.push(["Max plastic strain", fmt(r.max_plastic_strain)]);
   if (r.contact) {
     rows.push(["Contact nodes", String(r.contact.active_nodes)]);
@@ -20,10 +21,26 @@ function Summary({ r }) {
   if (r.strain_energy !== undefined) rows.push(["Strain energy", `${fmt(r.strain_energy)} J`]);
   if (r.reaction_total && t !== "dynamic") rows.push(["Σ reaction", `(${r.reaction_total.map((v) => fmt(v, 3)).join(", ")}) N`]);
   if (!rows.length) return null;
+  const ef = r.element_forces || [];
   return (
-    <table className="kv">
-      <tbody>{rows.map(([k, v]) => <tr key={k}><td>{k}</td><td>{v}</td></tr>)}</tbody>
-    </table>
+    <>
+      <table className="kv">
+        <tbody>{rows.map(([k, v]) => <tr key={k}><td>{k}</td><td>{v}</td></tr>)}</tbody>
+      </table>
+      {ef.length > 0 && (
+        <details>
+          <summary>Member forces ({ef.length})</summary>
+          <div style={{ maxHeight: 220, overflow: "auto" }}>
+            <table className="kv">
+              <thead><tr>{(r.element_force_columns || []).map((c) => <th key={c} style={{ textAlign: "left" }}>{c}</th>)}</tr></thead>
+              <tbody>
+                {ef.slice(0, 300).map((row) => <tr key={row[0]}>{row.map((v, i) => <td key={i}>{i === 0 ? v : fmt(v, 4)}</td>)}</tr>)}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      )}
+    </>
   );
 }
 

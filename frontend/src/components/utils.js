@@ -27,6 +27,66 @@ export const ELEMENTS = {
   C3D20: { label: "Hex20 (quadratic brick)", corners: 8, vtk: 25 },
 };
 
+/** Structural elements (6 DOFs per node): beams, trusses, springs, shells. */
+export const STRUCT_ELEMENTS = {
+  B31: { label: "Beam (B31, 3-D Timoshenko)", vtk: 3, line: true },
+  T3D2: { label: "Truss bar (T3D2)", vtk: 3, line: true },
+  SPRING2: { label: "Spring / dashpot (SPRING2)", vtk: 3, line: true },
+  S4: { label: "Shell (S4, MITC4 quad)", vtk: 9, line: false },
+};
+export const isStructural = (t) => !!STRUCT_ELEMENTS[t];
+export const isLineElement = (t) => !!STRUCT_ELEMENTS[t]?.line;
+
+/**
+ * Beams, bars and springs have no surface, so the viewport draws each as a thin hexagonal tube.
+ * The tube's ring vertices are appended after the real nodes; `baseOf[v]` gives the node a vertex belongs to, so
+ * displacements, contours and picks keep addressing real node ids.
+ */
+export function buildTubeView(nodes, elements, partOf, radius, sides = 6) {
+  const n = nodes.length;
+  const viewNodes = nodes.map((p) => p.slice());
+  const baseOf = new Int32Array(n + elements.length * 2 * sides);
+  for (let i = 0; i < n; i++) baseOf[i] = i;
+  const faces = [];
+  const faceParts = [];
+  const ringsOf = {};
+  elements.forEach((el, e) => {
+    const [a, b] = el;
+    const pa = nodes[a];
+    const pb = nodes[b];
+    const d = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
+    const len = Math.hypot(d[0], d[1], d[2]) || 1;
+    d[0] /= len; d[1] /= len; d[2] /= len;
+    const ref = Math.abs(d[2]) > 0.9 ? [1, 0, 0] : [0, 0, 1];
+    let u = [d[1] * ref[2] - d[2] * ref[1], d[2] * ref[0] - d[0] * ref[2], d[0] * ref[1] - d[1] * ref[0]];
+    const ul = Math.hypot(u[0], u[1], u[2]) || 1;
+    u = u.map((x) => x / ul);
+    const v = [d[1] * u[2] - d[2] * u[1], d[2] * u[0] - d[0] * u[2], d[0] * u[1] - d[1] * u[0]];
+    const r = Math.min(radius, len * 0.35);
+    const base = n + e * 2 * sides;
+    [a, b].forEach((node, end) => {
+      const c = nodes[node];
+      for (let k = 0; k < sides; k++) {
+        const th = (2 * Math.PI * k) / sides;
+        const idx = base + end * sides + k;
+        viewNodes[idx] = [
+          c[0] + r * (Math.cos(th) * u[0] + Math.sin(th) * v[0]),
+          c[1] + r * (Math.cos(th) * u[1] + Math.sin(th) * v[1]),
+          c[2] + r * (Math.cos(th) * u[2] + Math.sin(th) * v[2]),
+        ];
+        baseOf[idx] = node;
+        (ringsOf[node] = ringsOf[node] || []).push(idx);
+      }
+    });
+    for (let k = 0; k < sides; k++) {
+      const k1 = (k + 1) % sides;
+      faces.push([base + k, base + k1, base + sides + k1], [base + k, base + sides + k1, base + sides + k]);
+      faceParts.push(partOf[e] || 0, partOf[e] || 0);
+    }
+  });
+  return { nodes: viewNodes, faces, faceParts, baseOf, ringsOf };
+}
+
 /** Nodes that appear on the displayed surface (corner nodes of the render triangles). */
 export function surfaceNodeIds(faces) {
   const s = new Set();
@@ -141,6 +201,18 @@ export const FIELD_INFO = {
   equivalent_strain: ["Equivalent strain", ""],
   plastic_strain: ["Equivalent plastic strain", ""],
   strain_energy_density: ["Strain energy density", "J/m³"],
+  rotation_magnitude: ["Rotation magnitude", "rad"],
+  rx: ["Rotation X", "rad"], ry: ["Rotation Y", "rad"], rz: ["Rotation Z", "rad"],
+  axial_force: ["Axial / spring force", "N"],
+  shear_force: ["Shear force", "N"],
+  torsion: ["Torque", "N·m"],
+  bending_moment: ["Bending moment", "N·m"],
+  bending_stress: ["Bending stress (extreme fibre)", "Pa"],
+  von_mises_top: ["von Mises (shell top)", "Pa"],
+  von_mises_bottom: ["von Mises (shell bottom)", "Pa"],
+  shell_nx: ["Membrane force Nx", "N/m"], shell_ny: ["Membrane force Ny", "N/m"], shell_nxy: ["Membrane shear Nxy", "N/m"],
+  shell_mx: ["Bending moment Mx", "N·m/m"], shell_my: ["Bending moment My", "N·m/m"], shell_mxy: ["Twisting moment Mxy", "N·m/m"],
+  shell_shear: ["Transverse shear", "N/m"],
   contact_pressure: ["Contact pressure", "Pa"],
   contact_gap: ["Contact gap (negative = penetration)", "m"],
   temperature: ["Temperature", ""],
@@ -163,6 +235,7 @@ export function defaultField(results) {
   const t = results?.analysis_type;
   if (t === "thermal" || t === "thermal_transient") return "temperature";
   if (t === "dynamic") return "displacement_magnitude";
+  if (results?.fields && !results.fields.von_mises) return "displacement_magnitude";
   return "von_mises";
 }
 
@@ -263,7 +336,7 @@ export function resultsToCSV(project, results, disp) {
 
 /** Legacy ASCII VTK unstructured grid (opens in ParaView). Point data = every nodal field. */
 export function resultsToVTK(project, results, disp) {
-  const info = ELEMENTS[project.element_type] || ELEMENTS.C3D4;
+  const info = ELEMENTS[project.element_type] || STRUCT_ELEMENTS[project.element_type] || ELEMENTS.C3D4;
   const nn = project.elements[0]?.length || 4;
   const L = ["# vtk DataFile Version 3.0", "Gearhead FEA results", "ASCII", "DATASET UNSTRUCTURED_GRID"];
   L.push(`POINTS ${project.nodes.length} double`);

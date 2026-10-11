@@ -11,7 +11,7 @@ const PRESETS = {
   lbracket: { label: "L-bracket", dims: { length: 1, height: 1, thickness: 0.25, depth: 0.25 }, hex: true },
 };
 
-export default function GeometryPanel({ elementType, quality, onGenerate, onAppend, onImport, hasMesh, materials, defaultMaterial }) {
+export default function GeometryPanel({ elementType, quality, onGenerate, onAppend, onImport, onImportCad, hasMesh, materials, defaultMaterial }) {
   const [shape, setShape] = useState("box");
   const [dims, setDims] = useState(PRESETS.box.dims);
   const [divisions, setDivisions] = useState(4);
@@ -20,6 +20,11 @@ export default function GeometryPanel({ elementType, quality, onGenerate, onAppe
   const [bodyMaterial, setBodyMaterial] = useState("default");
   const [bodyName, setBodyName] = useState("");
   const fileRef = useRef(null);
+  const cadRef = useRef(null);
+  const [cadSize, setCadSize] = useState(0);
+  const [cadOrder, setCadOrder] = useState("2");
+  const [cadUnit, setCadUnit] = useState("mm");
+  const [cadBusy, setCadBusy] = useState(false);
 
   const preset = PRESETS[shape];
   const changeShape = (s) => {
@@ -73,6 +78,24 @@ export default function GeometryPanel({ elementType, quality, onGenerate, onAppe
       <button onClick={() => fileRef.current?.click()}>Import mesh (.inp / .msh)…</button>
       <p className="hint">CalculiX/Abaqus .inp or Gmsh 2.2 ASCII; tet4/tet10/hex8/hex20.</p>
 
+      <h4>CAD import</h4>
+      <input ref={cadRef} type="file" accept=".step,.stp,.iges,.igs,.stl" style={{ display: "none" }}
+        onChange={async (e) => {
+          const f = e.target.files[0];
+          e.target.value = "";
+          if (!f) return;
+          setCadBusy(true);
+          try { await onImportCad(f, { size: cadSize, order: +cadOrder, unit: cadUnit }); } finally { setCadBusy(false); }
+        }} />
+      <Select label="Length unit of the file" value={cadUnit} onChange={setCadUnit}
+        options={[{ value: "mm", label: "Millimetres" }, { value: "cm", label: "Centimetres" }, { value: "m", label: "Metres" }, { value: "in", label: "Inches" }]} />
+      <Num label="Element size (0 = automatic)" unit="m" value={cadSize} min={0} onCommit={setCadSize}
+        hint="Target edge length of the tetrahedra, in metres. Smaller = more accurate and slower." />
+      <Select label="Elements" value={cadOrder} onChange={setCadOrder}
+        options={[{ value: "2", label: "Tet10 (quadratic, recommended)" }, { value: "1", label: "Tet4 (linear)" }]} />
+      <button onClick={() => cadRef.current?.click()} disabled={cadBusy}>{cadBusy ? "Meshing the CAD file…" : "Import CAD (STEP / IGES / STL)…"}</button>
+      <p className="hint">Each solid becomes a part. STL must be a closed (watertight) surface. The CAD kernel runs on the server with a time limit.</p>
+
       {quality && (
         <>
           <h4>Mesh statistics</h4>
@@ -81,10 +104,12 @@ export default function GeometryPanel({ elementType, quality, onGenerate, onAppe
               <tr><td>Element type</td><td>{quality.element_type}</td></tr>
               <tr><td>Nodes</td><td>{quality.n_nodes.toLocaleString()}</td></tr>
               <tr><td>Elements</td><td>{quality.n_elements.toLocaleString()}</td></tr>
-              <tr><td>Volume</td><td>{fmt(quality.total_volume)} m³</td></tr>
-              <tr><td>Min Jacobian ratio</td><td>{fmt(quality.min_jacobian_ratio)}</td></tr>
-              <tr><td>Max edge ratio</td><td>{fmt(quality.max_edge_ratio)}</td></tr>
-              <tr><td>Inverted</td><td>{quality.inverted_elements}</td></tr>
+              {quality.total_volume !== undefined && <tr><td>Volume</td><td>{fmt(quality.total_volume)} m³</td></tr>}
+              {quality.total_length !== undefined && <tr><td>Total length</td><td>{fmt(quality.total_length)} m</td></tr>}
+              {quality.total_area !== undefined && <tr><td>Total area</td><td>{fmt(quality.total_area)} m²</td></tr>}
+              {quality.min_jacobian_ratio !== undefined && <tr><td>Min Jacobian ratio</td><td>{fmt(quality.min_jacobian_ratio)}</td></tr>}
+              {quality.max_edge_ratio !== undefined && <tr><td>Max edge ratio</td><td>{fmt(quality.max_edge_ratio)}</td></tr>}
+              {quality.inverted_elements !== undefined && <tr><td>Inverted</td><td>{quality.inverted_elements}</td></tr>}
             </tbody>
           </table>
         </>

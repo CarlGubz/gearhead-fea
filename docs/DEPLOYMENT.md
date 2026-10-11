@@ -38,6 +38,12 @@ Dev defaults: mock GCash, `http://localhost:5173`. The backend creates all table
 With `APP_ENV=production` the API **refuses to start** unless: DB is PostgreSQL, `APP_BASE_URL` is `https://`,
 cookies are `Secure`, the provider is not `mock`, and PayMongo keys are set.
 
+## CAD import (Gmsh)
+`gmsh` is a normal Python dependency (`requirements.txt`). The API runs it in a child process (`python -m app.fea.cad_worker`) with a 180 s limit, so make sure
+the backend image has `libglu1-mesa`, `libxrender1`, `libxcursor1`, `libxft2`, `libxinerama1`, `libfontconfig1` and `libgomp1` (the provided `Dockerfile` installs them -
+**that image was not built or run in the development environment, so verify it once**). If Gmsh is missing the endpoint answers 501 with an install hint and
+`/api/capabilities` reports `cad_import.available = false`. Gmsh is GPL-2+ (OpenCASCADE linking exception): review the licence before distributing the image.
+
 ## Go-live checklist
 - [ ] Domain + TLS in front of nginx; `APP_BASE_URL=https://…`
 - [ ] Strong `POSTGRES_PASSWORD`; DB on a managed/persistent volume; **backups + restore drill**

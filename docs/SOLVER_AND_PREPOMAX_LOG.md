@@ -48,7 +48,7 @@ Companion to [`SOLVER_AND_PREPOMAX_PLAN.md`](SOLVER_AND_PREPOMAX_PLAN.md). Techn
 | `vite build` | succeeds |
 
 ## 3. Known limitations (honest list)
-1. **Parity is partial by design** — see the roadmap matrix: no NLGEOM, no shells/beams, no CAD import, no friction. *(Contact between parts, undo/redo and the iterative solver were added afterwards - see `UNDO_ITERATIVE_CONTACT.md`.)* *(Multiple parts and per-part materials were added afterwards — see `PARTS_AND_MATERIALS.md`.)*
+1. **Parity is partial by design** — see the roadmap matrix: no friction. *(Contact between parts, undo/redo and the iterative solver were added afterwards - see `UNDO_ITERATIVE_CONTACT.md`; large deformation, beams/trusses/shells/springs and CAD import after that - see `NLGEOM_STRUCTURAL_CAD.md`.)* *(Multiple parts and per-part materials were added afterwards — see `PARTS_AND_MATERIALS.md`.)*
 2. Hex8 shows shear locking and Tet4 is stiff in bending (physics of those elements); the UI recommends the quadratic types.
 3. The section plane clips the surface; it does **not** draw a filled cap.
 4. The mesh-edge overlay shows the triangulation of quad faces on brick meshes (diagonals visible).

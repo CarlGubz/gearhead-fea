@@ -2,6 +2,9 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# Gmsh (CAD import: STEP / IGES / STL) needs a few shared libraries that the slim image does not ship
+RUN apt-get update && apt-get install -y --no-install-recommends         libglu1-mesa libxrender1 libxcursor1 libxft2 libxinerama1 libfontconfig1 libgomp1     && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

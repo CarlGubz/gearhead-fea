@@ -251,7 +251,7 @@ export default function Viewport3D({
   showEdges = false, showUndeformed = false, clip = null, showMinMax = false,
   selectedNodes = [], selectedFaces = [], onPickFace, probeMode = false, onProbe, probeNode = null,
   markers = [], refPoints = [], theme = "dark", pickMode = "none", setPickMode, allowFacePick = false,
-  viewCommand, setView, onApi, toolbarExtra, faceParts = null,
+  viewCommand, setView, onApi, toolbarExtra, faceParts = null, pickNearest = false,
 }) {
   const colors = GRID_COLORS[theme] || GRID_COLORS.dark;
   const bbox = useMemo(() => boundingBox(nodes), [nodes]);
@@ -288,7 +288,7 @@ export default function Viewport3D({
     const fi = e.faceIndex;
     if (fi === undefined || fi === null) return;
     const tri = faces[fi];
-    if (probeMode && onProbe) {
+    const nearest = () => {
       const pos = e.object.geometry.getAttribute("position");
       let best = tri[0];
       let bd = Infinity;
@@ -300,7 +300,15 @@ export default function Viewport3D({
         const dd = dx * dx + dy * dy + dz * dz;
         if (dd < bd) { bd = dd; best = n; }
       });
-      onProbe(best);
+      return best;
+    };
+    if (probeMode && onProbe) {
+      onProbe(nearest());
+      return;
+    }
+    // beams / bars have no faces: picking selects the end node nearest to the click
+    if (pickNearest && pickMode === "select" && onPickFace) {
+      onPickFace([nearest()], e.shiftKey, fi);
       return;
     }
     if (onPickFace && pickMode !== "none") onPickFace(tri, e.shiftKey, fi);

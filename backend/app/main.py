@@ -11,10 +11,11 @@ Gearhead FEA backend - FastAPI application.
 from __future__ import annotations
 
 import datetime as dt
+import os
 import threading
 from typing import Any, Dict, List
 
-from fastapi import Body, Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
@@ -23,7 +24,8 @@ from . import history, jobs, models, parts as parts_mod, plans, schemas
 from .config import settings
 from .database import Base, engine, get_db
 from .deps import current_user, owned_project, require_pro_for, tier_of, verify_origin
-from .fea import inp, meshgen
+from .fea import cad, inp, meshgen, structmesh
+from .fea import structural as struct_mod
 from .fea.elements import ELEMENT_TYPES
 from .fea.model import FEMesh
 from .fea.runner import ANALYSIS_TYPES
@@ -131,6 +133,9 @@ def capabilities():
         "free_analysis_types": ["static"],
         "element_types": [{"id": k, "nodes": v.n_nodes, "kind": v.kind} for k, v in ELEMENT_TYPES.items()],
         "shapes": meshgen.SHAPES,
+        "structural_types": [{"id": k, "nodes": n} for k, n in struct_mod.STRUCT_TYPES.items()],
+        "structural_shapes": structmesh.KINDS,
+        "cad_import": {"available": cad.available(), "formats": list(cad.FORMATS), "units": list(cad.UNITS)},
     }
 
 
@@ -149,10 +154,73 @@ def _new_id() -> str:
     return models.gen_id()
 
 
+def _is_struct(project: models.Project) -> bool:
+    return struct_mod.is_structural(project.element_type)
+
+
 def _fem_mesh(project: models.Project) -> FEMesh:
     if not project.elements:
         raise HTTPException(400, "Project has no mesh yet")
+    if _is_struct(project):
+        raise HTTPException(400, "This is a structural (beam / shell / truss / spring) model; the operation is for solid meshes.")
     return FEMesh(project.nodes, project.elements, project.element_type or "C3D4")
+
+
+def _struct_triangles(etype: str, elems) -> list:
+    """Render triangles of a shell model (two per quad: first all (0,1,2), then all (0,2,3)); none for line elements."""
+    if etype != "S4" or len(elems) == 0:
+        return []
+    e = [list(map(int, q)) for q in elems]
+    return [[q[0], q[1], q[2]] for q in e] + [[q[0], q[2], q[3]] for q in e]
+
+
+def _struct_surface_parts(etype: str, parts: list, ne: int) -> list:
+    if etype != "S4":
+        return []
+    import numpy as np
+    starts = np.array([p["elem_start"] for p in sorted(parts, key=lambda q: q["elem_start"])])
+    per_elem = np.searchsorted(starts, np.arange(ne), side="right") - 1
+    return per_elem.tolist() * 2
+
+
+def _clean_section(etype: str, section) -> dict:
+    try:
+        return struct_mod.validate_section(etype, section or struct_mod.default_section(etype))
+    except struct_mod.StructuralError as exc:
+        raise HTTPException(422, str(exc))
+
+
+def _set_structural(project: models.Project, nodes, elems, etype: str, parts=None, section=None,
+                    material_id: str = "default", name: str = "Body") -> None:
+    """Install a structural mesh as one part (or the given parts) and clear everything that referenced the old one."""
+    import numpy as np
+    nodes = np.asarray(nodes, dtype=float)
+    elems = np.asarray(elems, dtype=np.int64)
+    if etype not in struct_mod.STRUCT_TYPES:
+        raise HTTPException(422, f"Structural element type must be one of: {', '.join(struct_mod.STRUCT_TYPES)}")
+    if elems.ndim != 2 or elems.shape[1] != struct_mod.STRUCT_TYPES[etype]:
+        raise HTTPException(422, f"{etype} elements need {struct_mod.STRUCT_TYPES[etype]} nodes each")
+    if len(elems) == 0 or len(nodes) == 0:
+        raise HTTPException(422, "A model needs at least one element")
+    if elems.min() < 0 or elems.max() >= len(nodes):
+        raise HTTPException(422, "Element connectivity references a node that does not exist")
+    if len(nodes) > MAX_NODES:
+        raise HTTPException(413, f"Mesh too large ({len(nodes)} nodes, limit {MAX_NODES}).")
+    if not np.all(np.isfinite(nodes)):
+        raise HTTPException(422, "Node coordinates must be finite numbers")
+    project.nodes = nodes.tolist()
+    project.elements = elems.tolist()
+    project.element_type = etype
+    project.surface_faces = _struct_triangles(etype, elems)
+    sec = _clean_section(etype, section)
+    project.parts = parts if parts else [{"id": "p0", "name": name, "elem_start": 0, "elem_end": int(len(elems)),
+                                          "material_id": material_id, "section": sec}]
+    project.surface_parts = _struct_surface_parts(etype, project.parts, len(elems))
+    project.boundary_conditions = []
+    project.loads = []
+    project.constraints = []
+    project.reference_points = []
+    project.node_sets = []
 
 
 def _set_mesh(project: models.Project, mesh: FEMesh, part_name: str = "Body", parts=None) -> None:
@@ -280,7 +348,9 @@ def import_project(data: Dict[str, Any] = Body(...), user: models.User = Depends
     _limit_check(user, db)
     project = _blank_project(user, str(data.get("name") or "Imported project")[:120], str(data.get("description") or "")[:2000])
     try:
-        if data.get("elements"):
+        if data.get("elements") and struct_mod.is_structural(data.get("element_type")):
+            _set_structural(project, data["nodes"], data["elements"], data["element_type"])
+        elif data.get("elements"):
             mesh = FEMesh(data["nodes"], data["elements"], data.get("element_type") or "C3D4")
             _set_mesh(project, mesh)
         for key in ("material", "boundary_conditions", "loads", "gravity", "settings",
@@ -302,10 +372,13 @@ def import_project(data: Dict[str, Any] = Body(...), user: models.User = Depends
                 q["id"] = str(q.get("id") or parts_mod.new_id(plist, "p"))
                 q["material_id"] = q.get("material_id") if q.get("material_id") in ids else "default"
                 q["name"] = str(q.get("name") or q["id"])[:60]
+                if _is_struct(project):
+                    q["section"] = _clean_section(project.element_type, q.get("section"))
                 plist.append(q)
             parts_mod.check_tiling(plist, len(project.elements))
             project.parts = plist
-            project.surface_parts = parts_mod.surface_parts(FEMesh(project.nodes, project.elements, project.element_type), plist)
+            project.surface_parts = (_struct_surface_parts(project.element_type, plist, len(project.elements)) if _is_struct(project)
+                                     else parts_mod.surface_parts(FEMesh(project.nodes, project.elements, project.element_type), plist))
         atype = data.get("analysis_type") or "static"
         project.analysis_type = atype if atype in plans.limits_for(tier_of(user)).analysis_types else "static"
         project.n_modes = max(1, min(int(data.get("n_modes") or 6), 50))
@@ -363,6 +436,8 @@ def export_project(project: models.Project = Depends(owned_project)):
 
 @app.get("/api/projects/{project_id}/export/inp")
 def export_inp(project: models.Project = Depends(owned_project)):
+    if _is_struct(project):
+        raise HTTPException(400, "Structural (beam / shell / truss / spring) models cannot be exported to .inp yet. Use 'Save project'.")
     _fem_mesh(project)
     from .jobs import project_to_dict
     try:
@@ -419,6 +494,74 @@ def append_part(payload: schemas.AppendPartRequest, project: models.Project = De
     return _commit(db, project, "Add body")
 
 
+@app.post("/api/projects/{project_id}/mesh/structural", response_model=schemas.ProjectOut)
+def generate_structural(payload: schemas.StructuralMeshRequest, project: models.Project = Depends(owned_project),
+                        db: Session = Depends(get_db)):
+    """Generate a beam / truss / spring / shell model (separate model class: 6 DOFs per node)."""
+    try:
+        nodes, elems = structmesh.generate(payload.kind, payload.dims, payload.element_type, payload.divisions)
+    except struct_mod.StructuralError as exc:
+        raise HTTPException(400, f"Mesh generation failed: {exc}")
+    mid = payload.material_id or "default"
+    if mid not in _material_ids(project):
+        raise HTTPException(422, "Unknown material")
+    _set_structural(project, nodes, elems, payload.element_type, section=payload.section, material_id=mid,
+                    name=structmesh.NAMES.get(payload.kind, "Body"))
+    return _commit(db, project, "Generate structural mesh")
+
+
+@app.post("/api/projects/{project_id}/mesh/structural/append", response_model=schemas.ProjectOut)
+def append_structural(payload: schemas.AppendStructuralRequest, project: models.Project = Depends(owned_project),
+                      db: Session = Depends(get_db)):
+    """Add members to a structural model as a new part (own material and section); coincident nodes are joined."""
+    import numpy as np
+    from scipy.spatial import cKDTree
+    if not _is_struct(project) or not project.elements:
+        raise HTTPException(400, "Generate a structural model first")
+    if payload.element_type != project.element_type:
+        raise HTTPException(422, f"This model uses {project.element_type} elements; the new part must use the same type.")
+    if len(payload.offset) != 3:
+        raise HTTPException(422, "offset needs 3 numbers")
+    try:
+        nodes, elems = structmesh.generate(payload.kind, payload.dims, payload.element_type, payload.divisions)
+    except struct_mod.StructuralError as exc:
+        raise HTTPException(400, f"Mesh generation failed: {exc}")
+    mid = payload.material_id or "default"
+    if mid not in _material_ids(project):
+        raise HTTPException(422, "Unknown material")
+    base_nodes = np.array(project.nodes, dtype=float)
+    base_elems = np.array(project.elements, dtype=np.int64)
+    new_nodes = nodes + np.array(payload.offset, dtype=float)
+    mapping = -np.ones(len(new_nodes), dtype=np.int64)
+    if payload.merge:
+        scale = max(float(np.ptp(base_nodes, axis=0).max()), float(np.ptp(new_nodes, axis=0).max()), 1.0)
+        dist, idx = cKDTree(base_nodes).query(new_nodes)
+        hit = dist <= 1e-9 * scale
+        mapping[hit] = idx[hit]
+    fresh = np.where(mapping < 0)[0]
+    mapping[fresh] = len(base_nodes) + np.arange(len(fresh))
+    merged_nodes = np.vstack([base_nodes, new_nodes[fresh]])
+    new_elems = mapping[elems]
+    if payload.element_type in ("B31", "T3D2", "SPRING2") and np.any(new_elems[:, 0] == new_elems[:, 1]):
+        raise HTTPException(422, "A new element would collapse onto a single node")
+    old_parts = _ensure_parts(project)
+    label = (payload.name or structmesh.NAMES.get(payload.kind, "Body")).strip()
+    taken = {p["name"] for p in old_parts}
+    name, k = label, 2
+    while name in taken:
+        name, k = f"{label} {k}", k + 1
+    new_part = {"id": parts_mod.new_id(old_parts, "p"), "name": name, "elem_start": len(base_elems),
+                "elem_end": len(base_elems) + len(new_elems), "material_id": mid,
+                "section": _clean_section(payload.element_type, payload.section)}
+    keep = (project.boundary_conditions, project.loads, project.node_sets)
+    all_elems = np.vstack([base_elems, new_elems])
+    _set_structural(project, merged_nodes, all_elems, payload.element_type, parts=[*old_parts, new_part])
+    project.boundary_conditions, project.loads, project.node_sets = keep   # node ids of existing members are unchanged
+    if payload.element_type == "S4":                                      # face-based loads would address old triangle lists
+        project.loads = [l for l in project.loads if not l.get("faces")]
+    return _commit(db, project, "Add members")
+
+
 @app.post("/api/projects/{project_id}/mesh/import", response_model=schemas.ProjectOut)
 async def import_mesh(file: UploadFile = File(...), project: models.Project = Depends(owned_project),
                       db: Session = Depends(get_db)):
@@ -445,6 +588,51 @@ async def import_mesh(file: UploadFile = File(...), project: models.Project = De
     return _commit(db, project, "Import mesh")
 
 
+@app.post("/api/projects/{project_id}/mesh/structural/custom", response_model=schemas.ProjectOut)
+def custom_structural(payload: schemas.CustomStructuralMesh, project: models.Project = Depends(owned_project),
+                      db: Session = Depends(get_db)):
+    """Arbitrary truss / frame / spring / shell layout from node coordinates and connectivity."""
+    _set_structural(project, payload.nodes, payload.elements, payload.element_type, section=payload.section)
+    return _commit(db, project, "Upload structural mesh")
+
+
+@app.post("/api/projects/{project_id}/mesh/cad", response_model=schemas.ProjectOut)
+def import_cad(file: UploadFile = File(...), size: float = Form(0.0), order: int = Form(2), unit: str = Form("mm"),
+               project: models.Project = Depends(owned_project), db: Session = Depends(get_db)):
+    """
+    Mesh a STEP / IGES / STL file with Gmsh into Tet4 (order 1) or Tet10 (order 2). Each solid becomes a part.
+    `size` is the target element size in metres (0 = automatic), `unit` the length unit of the file (mm, cm, m, in).
+    The geometry kernel runs in a separate process with a time limit.
+    """
+    raw = file.file.read(MAX_UPLOAD_BYTES + 1)
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, "File too large (limit 25 MB)")
+    try:
+        nodes, elems, ends = cad.mesh_cad(raw, file.filename or "", size, order, unit)
+    except cad.CadError as exc:
+        raise HTTPException(400, f"Could not import the CAD file: {exc}")
+    except RuntimeError as exc:
+        raise HTTPException(501, str(exc))
+    etype = "C3D4" if order == 1 else "C3D10"
+    try:
+        mesh = FEMesh(nodes, elems, etype)
+    except ValueError as exc:
+        raise HTTPException(400, f"The imported mesh is invalid: {exc}")
+    stem = (os.path.splitext(os.path.basename(file.filename or "CAD"))[0] or "CAD")[:40]
+    plist, start = [], 0
+    for k, end in enumerate(int(e) for e in ends[:50]):
+        plist.append({"id": f"p{k}", "name": stem if len(ends) == 1 else f"{stem} {k + 1}", "elem_start": start,
+                      "elem_end": end, "material_id": "default"})
+        start = end
+    if start < mesh.n_elems:                         # more than 50 solids: the rest joins the last part
+        plist[-1]["elem_end"] = mesh.n_elems
+    try:
+        _set_mesh(project, mesh, parts=plist)
+    except ValueError as exc:
+        raise HTTPException(400, f"The imported mesh is invalid: {exc}")
+    return _commit(db, project, "Import CAD")
+
+
 @app.post("/api/projects/{project_id}/mesh/custom", response_model=schemas.ProjectOut)
 def upload_custom_mesh(nodes: List[List[float]], elements: List[List[int]], element_type: str = "C3D4",
                        project: models.Project = Depends(owned_project), db: Session = Depends(get_db)):
@@ -458,6 +646,21 @@ def upload_custom_mesh(nodes: List[List[float]], elements: List[List[int]], elem
 
 @app.get("/api/projects/{project_id}/mesh/quality")
 def mesh_quality(project: models.Project = Depends(owned_project)):
+    if _is_struct(project):
+        import numpy as np
+        nodes = np.array(project.nodes, dtype=float)
+        elems = np.array(project.elements, dtype=np.int64)
+        if len(elems) == 0:
+            raise HTTPException(400, "Project has no mesh yet")
+        X = nodes[elems]
+        out = {"n_nodes": int(len(nodes)), "n_elements": int(len(elems)), "element_type": project.element_type,
+               "model_class": "structural"}
+        if project.element_type == "S4":
+            n = np.cross(X[:, 2] - X[:, 0], X[:, 3] - X[:, 1]) / 2.0
+            out["total_area"] = float(np.linalg.norm(n, axis=1).sum())
+        else:
+            out["total_length"] = float(np.linalg.norm(X[:, 1] - X[:, 0], axis=1).sum())
+        return out
     return _fem_mesh(project).quality()
 
 
@@ -527,6 +730,10 @@ def update_part(part_id: str, payload: schemas.PartUpdate, project: models.Proje
         if payload.material_id not in _material_ids(project):
             raise HTTPException(422, "Unknown material")
         part["material_id"] = payload.material_id
+    if payload.section is not None:
+        if not _is_struct(project):
+            raise HTTPException(422, "Sections apply to structural (beam / shell / truss / spring) parts only")
+        part["section"] = _clean_section(project.element_type, payload.section)
     project.parts = plist
     return _commit(db, project, "Edit part")
 
@@ -563,12 +770,19 @@ def delete_part(part_id: str, project: models.Project = Depends(owned_project), 
     setup = parts_mod.remap_setup({
         "boundary_conditions": project.boundary_conditions, "loads": project.loads, "constraints": project.constraints,
         "node_sets": project.node_sets, "settings": project.settings}, remap, part_id)
-    mesh = FEMesh(nodes, elems, project.element_type or "C3D4")
-    project.nodes = mesh.nodes.tolist()
-    project.elements = mesh.elems.tolist()
-    project.parts = new_parts
-    project.surface_faces = mesh.boundary().tris.tolist()
-    project.surface_parts = parts_mod.surface_parts(mesh, new_parts)
+    if _is_struct(project):
+        project.nodes = nodes.tolist()
+        project.elements = elems.tolist()
+        project.parts = new_parts
+        project.surface_faces = _struct_triangles(project.element_type, elems)
+        project.surface_parts = _struct_surface_parts(project.element_type, new_parts, len(elems))
+    else:
+        mesh = FEMesh(nodes, elems, project.element_type or "C3D4")
+        project.nodes = mesh.nodes.tolist()
+        project.elements = mesh.elems.tolist()
+        project.parts = new_parts
+        project.surface_faces = mesh.boundary().tris.tolist()
+        project.surface_parts = parts_mod.surface_parts(mesh, new_parts)
     for key, value in setup.items():
         setattr(project, key, value)
     return _commit(db, project, "Delete part")
@@ -626,9 +840,10 @@ def add_bc(payload: schemas.BoundaryCondition, project: models.Project = Depends
         _check_node_ids(project, bc["node_ids"])
         if not bc["node_ids"]:
             raise HTTPException(422, "Select at least one node first")
-        limit = 1 if bc.get("bc_type") == "temperature" else 3
+        limit = 1 if bc.get("bc_type") == "temperature" else (6 if _is_struct(project) else 3)
         if any(d < 0 or d >= max(limit, 1) for d in bc["dofs"]) and bc.get("bc_type") != "temperature":
-            raise HTTPException(422, "DOFs must be 0 (x), 1 (y) or 2 (z)")
+            raise HTTPException(422, "DOFs must be 0..5 (x, y, z, rotation x, y, z)" if _is_struct(project)
+                                else "DOFs must be 0 (x), 1 (y) or 2 (z)")
     bc["id"] = bc.get("id") or _new_id()
     project.boundary_conditions = [*(project.boundary_conditions or []), bc]
     return _commit(db, project, "Add support")
@@ -646,14 +861,20 @@ def add_load(payload: schemas.Load, project: models.Project = Depends(owned_proj
     ld = payload.model_dump()
     kind = ld["load_type"]
     valid = {"force", "pressure", "traction", "ref_force", "heat_flux", "surface_flux", "body_heat",
-             "convection", "radiation"}
+             "convection", "radiation", "line_load", "point_mass"}
     if kind not in valid:
         raise HTTPException(422, f"load_type must be one of: {', '.join(sorted(valid))}")
     _check_node_ids(project, ld["node_ids"])
     if kind in ("pressure", "traction", "surface_flux", "convection", "radiation") and not ld.get("faces"):
         raise HTTPException(422, "Select at least one face first")
-    if kind in ("force", "heat_flux") and not ld["node_ids"]:
+    if kind in ("force", "heat_flux", "point_mass") and not ld["node_ids"]:
         raise HTTPException(422, "Select at least one node first")
+    if kind in ("line_load", "point_mass") and not _is_struct(project):
+        raise HTTPException(422, f"'{kind}' loads apply to structural (beam / shell / truss / spring) models only")
+    if kind == "point_mass" and (ld.get("magnitude") is None or ld["magnitude"] <= 0):
+        raise HTTPException(422, "A point mass needs a positive magnitude (kg)")
+    if kind == "line_load" and ld.get("part_id") and ld["part_id"] not in {p["id"] for p in _ensure_parts(project)}:
+        raise HTTPException(422, "Unknown part")
     if kind == "ref_force" and ld.get("ref_id") not in _ref_ids(project):
         raise HTTPException(422, "Unknown reference point")
     if kind == "convection" and (ld.get("h") is None or ld.get("T_inf") is None):

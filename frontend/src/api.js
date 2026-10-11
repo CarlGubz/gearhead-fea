@@ -53,6 +53,9 @@ export const generatePrimitive = (id, shape, dims, divisions, element_type = "C3
   api.post(`/projects/${id}/mesh/primitive`, { shape, dims, divisions, element_type }).then((r) => r.data);
 export const appendPart = (id, shape, dims, divisions, offset, element_type, name, material_id) =>
   api.post(`/projects/${id}/mesh/append`, { shape, dims, divisions, offset, element_type, name, material_id }).then((r) => r.data);
+export const generateStructural = (id, body) => api.post(`/projects/${id}/mesh/structural`, body).then((r) => r.data);
+export const appendStructural = (id, body) => api.post(`/projects/${id}/mesh/structural/append`, body).then((r) => r.data);
+export const customStructural = (id, body) => api.post(`/projects/${id}/mesh/structural/custom`, body).then((r) => r.data);
 export const addMaterial = (id, m) => api.post(`/projects/${id}/materials`, m).then((r) => r.data);
 export const updateMaterial = (id, mid, m) => api.put(`/projects/${id}/materials/${mid}`, m).then((r) => r.data);
 export const deleteMaterial = (id, mid) => api.delete(`/projects/${id}/materials/${mid}`).then((r) => r.data);
@@ -65,6 +68,14 @@ export const importMesh = (id, file) => {
   const form = new FormData();
   form.append("file", file);
   return api.post(`/projects/${id}/mesh/import`, form).then((r) => r.data);
+};
+export const importCad = (id, file, { size = 0, order = 2, unit = "mm" } = {}) => {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("size", String(size));
+  form.append("order", String(order));
+  form.append("unit", unit);
+  return api.post(`/projects/${id}/mesh/cad`, form, { timeout: 240000 }).then((r) => r.data);
 };
 export const meshQuality = (id) => api.get(`/projects/${id}/mesh/quality`).then((r) => r.data);
 export const capabilities = () => api.get("/capabilities").then((r) => r.data);

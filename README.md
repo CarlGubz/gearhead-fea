@@ -18,6 +18,7 @@ binary is needed. It also ships a product website, PostgreSQL-backed accounts an
 | [`docs/SOLVER_AND_PREPOMAX_LOG.md`](docs/SOLVER_AND_PREPOMAX_LOG.md) | What was built, how it was verified, known limitations |
 | [`docs/PARTS_AND_MATERIALS.md`](docs/PARTS_AND_MATERIALS.md) | Multiple parts and materials: design, API, verification, limits |
 | [`docs/UNDO_ITERATIVE_CONTACT.md`](docs/UNDO_ITERATIVE_CONTACT.md) | Undo/redo, iterative solver for large models, frictionless contact between parts: design, results, limits |
+| [`docs/NLGEOM_STRUCTURAL_CAD.md`](docs/NLGEOM_STRUCTURAL_CAD.md) | Large deformation (NLGEOM), truss / beam / shell / spring elements, STEP / IGES / STL import: design, verification numbers, limits |
 | [`docs/AUTH_AND_BILLING.md`](docs/AUTH_AND_BILLING.md) | Login system, plans, GCash (PayMongo) flow, going live |
 | [`docs/DESIGN_SYSTEM.md`](docs/DESIGN_SYSTEM.md) | Site visual identity and reusable components |
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Env vars, Docker/PostgreSQL, production checklist |
@@ -27,12 +28,12 @@ binary is needed. It also ships a product website, PostgreSQL-backed accounts an
 **Pre-processing** — box, cylinder, sphere, tube, plate-with-hole and L-bracket primitives; Tet4 / Tet10 / Hex8 / Hex20
 elements; **multiple parts, each with its own material from a library** (rename, move, hide, delete; automatic tie between parts);
 mesh import (`.inp` with parts and materials, Gmsh `.msh`); mesh statistics; materials with thermal and plastic
-properties; reference points; rigid-body, tie and **frictionless contact** constraints; **undo/redo** (Ctrl+Z / Ctrl+Y); selection by click, coordinate range, face angle or id,
+properties; reference points; rigid-body, tie and **frictionless contact** constraints; **beams, trusses, shells and springs** (6-DOF structural models); **CAD import** (STEP / IGES / STL, meshed with Gmsh); **undo/redo** (Ctrl+Z / Ctrl+Y); selection by click, coordinate range, face angle or id,
 with named sets; supports (fixed, symmetry, prescribed displacement); loads (force, pressure, traction, remote
 force/moment, gravity, centrifugal, thermal strain, heat source, flux, convection, radiation).
 
 **Analyses (8)** — static · nonlinear (J2 plasticity) · frequency · linear buckling · dynamic (Newmark) ·
-heat transfer steady · heat transfer transient · thermo-mechanical. Free plan: static; Pro: all.
+heat transfer steady · heat transfer transient · thermo-mechanical, plus **large deformation (NLGEOM)** for solids. Free plan: static; Pro: all.
 
 **Post-processing** — contours of displacement, von Mises, Tresca, principal, stress/strain components, plastic
 strain, temperature, heat flux; deformation scale/animation, undeformed ghost, mesh edges, section plane, min/max
@@ -65,7 +66,7 @@ The Vite dev server proxies `/api` to the backend. Payments default to a mock GC
 
 ### Tests
 ```bash
-cd backend && pytest tests                                         # 150 tests, SQLite
+cd backend && pytest tests                                         # 223 tests, SQLite
 TEST_DATABASE_URL=postgresql://user:pass@host/db_test pytest tests  # same suite on PostgreSQL
 ```
 
