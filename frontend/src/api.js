@@ -113,6 +113,12 @@ export const getJob = (jobId) => api.get(`/jobs/${jobId}`).then((r) => r.data);
 export const latestJob = (id) => api.get(`/projects/${id}/jobs/latest`).then((r) => r.data);
 export const listJobs = (id) => api.get(`/projects/${id}/jobs`).then((r) => r.data);
 
+// ------------------------------------------------------------------ AI agent
+export const agentStatus = () => api.get("/agent/status").then((r) => r.data);
+/** messages: [{role: "user" | "assistant", content}] -> {reply, steps, run_simulation, project} */
+export const agentChat = (id, messages) =>
+  api.post(`/projects/${id}/agent/chat`, { messages }, { timeout: 240000 }).then((r) => r.data);
+
 // ------------------------------------------------------------------ accounts
 export const me = () => api.get("/auth/me").then((r) => r.data);
 export const register = (email, password, full_name) =>

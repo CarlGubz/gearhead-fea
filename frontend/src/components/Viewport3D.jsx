@@ -1,8 +1,10 @@
-import React, { useEffect, useMemo, useRef } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, Grid, GizmoHelper, GizmoViewport } from "@react-three/drei";
 import * as THREE from "three";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { boundingBox, minMax } from "./utils.js";
+import { glyphSize } from "./glyphs.js";
 
 // FEA models are Z-up (gravity is -Z), so the whole scene is Z-up as well.
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
@@ -38,6 +40,7 @@ export function colormap(t) {
 function SurfaceMesh({
   nodes, faces, displacements, field, range, deformScale, animate, oscillate,
   showEdges, showUndeformed, planes, selectedNodes, selectedFaces, onClickFace, scaleRef, faceParts,
+  onHover, onHoverEnd,
 }) {
   const base = useMemo(() => {
     const nv = faces.length * 3;
@@ -132,7 +135,7 @@ function SurfaceMesh({
 
   return (
     <>
-      <mesh geometry={geometry} onClick={onClickFace}>
+      <mesh geometry={geometry} onClick={onClickFace} onPointerMove={onHover} onPointerOut={onHoverEnd}>
         <meshStandardMaterial vertexColors side={THREE.DoubleSide} flatShading clippingPlanes={planes}
           polygonOffset polygonOffsetFactor={1} polygonOffsetUnits={1} />
       </mesh>
@@ -150,7 +153,20 @@ function SurfaceMesh({
   );
 }
 
-/** Points that follow the (animated) deformation: supports, loads, probe, min/max. */
+// Round, outlined sprite so probe / min / max markers are discs, not the default square points.
+let discTexture = null;
+function getDiscTexture() {
+  if (discTexture || typeof document === "undefined") return discTexture;
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const g = c.getContext("2d");
+  g.beginPath(); g.arc(32, 32, 30, 0, Math.PI * 2); g.fillStyle = "#000"; g.fill();
+  g.beginPath(); g.arc(32, 32, 24, 0, Math.PI * 2); g.fillStyle = "#fff"; g.fill();
+  discTexture = new THREE.CanvasTexture(c);
+  return discTexture;
+}
+
+/** Round markers that follow the (animated) deformation: probe, min / max. */
 function PointLayer({ nodes, ids, displacements, color, size = 7, scaleRef }) {
   const geometry = useMemo(() => {
     const g = new THREE.BufferGeometry();
@@ -174,8 +190,84 @@ function PointLayer({ nodes, ids, displacements, color, size = 7, scaleRef }) {
   if (!ids.length) return null;
   return (
     <points geometry={geometry} renderOrder={10} frustumCulled={false}>
-      <pointsMaterial color={color} size={size} sizeAttenuation={false} depthTest={false} />
+      <pointsMaterial color={color} size={size * 1.5} sizeAttenuation={false} depthTest={false}
+        map={getDiscTexture()} alphaTest={0.5} transparent />
     </points>
+  );
+}
+
+/* ------------------------------------------------ 3-D glyphs (arrows, cones, spheres) */
+// All glyph geometries have their tip (or centre, for spheres) on the origin and point along +Z.
+const GLYPH_GEOMETRY = (() => {
+  const toZ = (g) => { g.rotateX(Math.PI / 2); return g; }; // three's cones/cylinders stand along +Y
+  const head = toZ(new THREE.ConeGeometry(0.2, 0.42, 20)); head.translate(0, 0, -0.21);
+  const shaft = toZ(new THREE.CylinderGeometry(0.058, 0.058, 0.62, 12)); shaft.translate(0, 0, -0.73);
+  const cone = toZ(new THREE.ConeGeometry(0.3, 0.85, 22)); cone.translate(0, 0, -0.425);
+  return {
+    arrow: mergeGeometries([head, shaft]),
+    cone,
+    sphere: new THREE.SphereGeometry(0.2, 18, 14),
+  };
+})();
+const Z_AXIS = new THREE.Vector3(0, 0, 1);
+
+/** One colour, one shape, many positions: a single draw call however many nodes carry the glyph. */
+function GlyphLayer({ layer, size }) {
+  const ref = useRef();
+  useEffect(() => {
+    const mesh = ref.current;
+    if (!mesh) return;
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const pos = new THREE.Vector3();
+    const dir = new THREE.Vector3();
+    const sc = new THREE.Vector3();
+    const k = layer.shape === "cone" ? size * 0.75 : layer.shape === "sphere" ? size * 0.7 : size;
+    layer.items.forEach((it, i) => {
+      pos.set(it.p[0], it.p[1], it.p[2]);
+      dir.set(it.d[0], it.d[1], it.d[2]);
+      q.setFromUnitVectors(Z_AXIS, dir.lengthSq() ? dir.normalize() : Z_AXIS);
+      m.compose(pos, q, sc.set(k, k, k));
+      mesh.setMatrixAt(i, m);
+    });
+    mesh.count = layer.items.length;
+    mesh.instanceMatrix.needsUpdate = true;
+  }, [layer, size]);
+  return (
+    <instancedMesh ref={ref} args={[GLYPH_GEOMETRY[layer.shape], undefined, layer.items.length]}
+      renderOrder={10} frustumCulled={false}>
+      <meshStandardMaterial color={layer.color} roughness={0.45} metalness={0.1} depthTest={false} />
+    </instancedMesh>
+  );
+}
+
+/** Glyph layers for supports / loads. The size is shared so every symbol in the scene reads at one scale. */
+function Glyphs({ layers, diag }) {
+  const busiest = layers.reduce((n, l) => Math.max(n, l.shape === "cone" ? l.items.length / 2 : l.items.length), 0);
+  const size = glyphSize(diag, busiest);
+  return layers.map((l, i) => <GlyphLayer key={`${l.shape}-${l.color}-${i}`} layer={l} size={size} />);
+}
+
+const AXIS_ARROWS = [
+  { color: "#e03c3c", q: new THREE.Quaternion().setFromUnitVectors(Z_AXIS, new THREE.Vector3(1, 0, 0)), at: [1, 0, 0] },
+  { color: "#3cb94b", q: new THREE.Quaternion().setFromUnitVectors(Z_AXIS, new THREE.Vector3(0, 1, 0)), at: [0, 1, 0] },
+  { color: "#3c7de0", q: new THREE.Quaternion(), at: [0, 0, 1] },
+];
+
+/** The 3-D pick cursor: a hub with X / Y / Z arrows (red / green / blue) that follows the pointer over the model. */
+function PickCursor({ position, size }) {
+  if (!position) return null;
+  return (
+    <group position={position} scale={size} renderOrder={20}>
+      <mesh geometry={GLYPH_GEOMETRY.sphere} scale={0.55} renderOrder={20}>
+        <meshBasicMaterial color="#ffffff" depthTest={false} />
+      </mesh>
+      {AXIS_ARROWS.map((a) => (
+        <mesh key={a.color} geometry={GLYPH_GEOMETRY.arrow} position={a.at} quaternion={a.q} renderOrder={20}>
+          <meshBasicMaterial color={a.color} depthTest={false} />
+        </mesh>
+      ))}
+    </group>
   );
 }
 
@@ -235,6 +327,24 @@ function Rig({ bbox, viewCommand, onApi }) {
   return null;
 }
 
+/** Toolbar pictograms (inline SVG so they inherit the button colour and stay crisp at any zoom). */
+function ToolIcon({ name }) {
+  const common = { width: 18, height: 18, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.7,
+    strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true };
+  switch (name) {
+    case "orbit": // two arrows circling a model
+      return (<svg {...common}><ellipse cx="12" cy="12" rx="9" ry="4.2" transform="rotate(-25 12 12)" /><path d="M19 6.5l1.5 3.3-3.5.2" /><circle cx="12" cy="12" r="2.2" fill="currentColor" /></svg>);
+    case "node": // pointer arrow landing on a node
+      return (<svg {...common}><path d="M5 3l12 6.2-5.3 1.6L9.6 16z" fill="currentColor" fillOpacity=".15" /><circle cx="18" cy="18" r="2.6" fill="currentColor" /></svg>);
+    case "face": // a highlighted face of a cube
+      return (<svg {...common}><path d="M12 3l8 4v10l-8 4-8-4V7z" /><path d="M12 11v10M4 7l8 4 8-4" /><path d="M12 11l8-4v10l-8 4z" fill="currentColor" fillOpacity=".35" /></svg>);
+    case "angle": // faces that meet at an angle
+      return (<svg {...common}><path d="M3 18h10l6-9" /><path d="M13 18a6 6 0 0 0-1.4-3.8" /><path d="M3 18V6l9 0" strokeDasharray="2 2.4" /></svg>);
+    default:
+      return null;
+  }
+}
+
 const GRID_COLORS = {
   light: { cell: "#aab4c4", section: "#7f8a9c", bg: "linear-gradient(#f7f9fc, #b9c3d3)" },
   dark: { cell: "#3a4150", section: "#566075", bg: "linear-gradient(#2a303a, #12151a)" },
@@ -250,7 +360,7 @@ export default function Viewport3D({
   nodes, faces, displacements, field, range = null, deformScale = 0, animate = false, oscillate = false,
   showEdges = false, showUndeformed = false, clip = null, showMinMax = false,
   selectedNodes = [], selectedFaces = [], onPickFace, probeMode = false, onProbe, probeNode = null,
-  markers = [], refPoints = [], theme = "dark", pickMode = "none", setPickMode, allowFacePick = false,
+  glyphs = [], refPoints = [], theme = "dark", pickMode = "none", setPickMode, allowFacePick = false,
   viewCommand, setView, onApi, toolbarExtra, faceParts = null, pickNearest = false,
 }) {
   const colors = GRID_COLORS[theme] || GRID_COLORS.dark;
@@ -283,25 +393,39 @@ export default function Viewport3D({
     return { lo: lo >= 0 ? [lo] : [], hi: hi >= 0 ? [hi] : [] };
   }, [showMinMax, field, faces]);
 
+  /** Mesh vertex (node id + position) of the hit triangle that is closest to the ray hit point. */
+  const nearestVertex = (e) => {
+    const tri = faces[e.faceIndex];
+    const pos = e.object.geometry.getAttribute("position");
+    let best = 0;
+    let bd = Infinity;
+    tri.forEach((n, vi) => {
+      const k = e.faceIndex * 3 + vi;
+      const dd = (pos.getX(k) - e.point.x) ** 2 + (pos.getY(k) - e.point.y) ** 2 + (pos.getZ(k) - e.point.z) ** 2;
+      if (dd < bd) { bd = dd; best = vi; }
+    });
+    const k = e.faceIndex * 3 + best;
+    return { id: tri[best], at: [pos.getX(k), pos.getY(k), pos.getZ(k)] };
+  };
+
+  // 3-D pick cursor: snaps to the nearest node in node/probe mode, follows the surface in face modes
+  const [cursor, setCursor] = useState(null);
+  const picking = pickMode !== "none" || probeMode;
+  const handleHover = (e) => {
+    if (!picking || e.faceIndex === undefined || e.faceIndex === null) return;
+    e.stopPropagation();
+    const at = pickMode === "select" || probeMode ? nearestVertex(e).at : [e.point.x, e.point.y, e.point.z];
+    setCursor((c) => (c && c[0] === at[0] && c[1] === at[1] && c[2] === at[2] ? c : at));
+  };
+  const clearCursor = () => setCursor(null);
+  useEffect(() => { if (!picking) setCursor(null); }, [picking]);
+
   const handleClick = (e) => {
     e.stopPropagation();
     const fi = e.faceIndex;
     if (fi === undefined || fi === null) return;
     const tri = faces[fi];
-    const nearest = () => {
-      const pos = e.object.geometry.getAttribute("position");
-      let best = tri[0];
-      let bd = Infinity;
-      tri.forEach((n, vi) => {
-        const k = fi * 3 + vi;
-        const dx = pos.getX(k) - e.point.x;
-        const dy = pos.getY(k) - e.point.y;
-        const dz = pos.getZ(k) - e.point.z;
-        const dd = dx * dx + dy * dy + dz * dz;
-        if (dd < bd) { bd = dd; best = n; }
-      });
-      return best;
-    };
+    const nearest = () => nearestVertex(e).id;
     if (probeMode && onProbe) {
       onProbe(nearest());
       return;
@@ -319,14 +443,14 @@ export default function Viewport3D({
       {setPickMode && (
         <div className="viewport-toolbar">
           <button className={`toolbar-btn ${pickMode === "none" && !probeMode ? "active" : ""}`}
-            title="Orbit / pan / zoom (no selection)" onClick={() => setPickMode("none")}>⟲</button>
+            title="Orbit / pan / zoom (no selection)" onClick={() => setPickMode("none")}><ToolIcon name="orbit" /></button>
           <button className={`toolbar-btn ${pickMode === "select" ? "active" : ""}`}
-            title="Select nodes: click a face to select its nodes (shift = add)" onClick={() => setPickMode("select")}>◆</button>
+            title="Select nodes: click a face to select its nodes (shift = add)" onClick={() => setPickMode("select")}><ToolIcon name="node" /></button>
           <button className={`toolbar-btn ${pickMode === "select-faces" ? "active" : ""}`}
-            title="Select faces (shift = add)" disabled={!allowFacePick} onClick={() => setPickMode("select-faces")}>▤</button>
+            title="Select faces (shift = add)" disabled={!allowFacePick} onClick={() => setPickMode("select-faces")}><ToolIcon name="face" /></button>
           <button className={`toolbar-btn ${pickMode === "select-angle" ? "active" : ""}`}
             title="Select connected faces by angle (set the angle in the Selection panel)" disabled={!allowFacePick}
-            onClick={() => setPickMode("select-angle")}>◪</button>
+            onClick={() => setPickMode("select-angle")}><ToolIcon name="angle" /></button>
           <span className="vt-sep" />
           {[["iso", "ISO"], ["front", "Front"], ["right", "Right"], ["top", "Top"]].map(([n, l]) => (
             <button key={n} className="toolbar-btn" style={{ fontSize: 11 }} title={`${l} view`}
@@ -337,7 +461,8 @@ export default function Viewport3D({
           {toolbarExtra}
         </div>
       )}
-      <Canvas camera={{ fov: 45, up: [0, 0, 1] }} style={{ background: colors.bg }}
+      <Canvas camera={{ fov: 45, up: [0, 0, 1] }}
+        style={{ background: colors.bg, cursor: picking ? "crosshair" : "grab" }}
         gl={{ preserveDrawingBuffer: true, localClippingEnabled: true }}>
         <ambientLight intensity={0.75} />
         <directionalLight position={[5, -8, 9]} intensity={0.8} />
@@ -348,11 +473,10 @@ export default function Viewport3D({
           deformScale={deformScale} animate={animate} oscillate={oscillate} showEdges={showEdges}
           showUndeformed={showUndeformed} planes={planes} selectedNodes={selectedNodes}
           selectedFaces={selectedFaces} onClickFace={handleClick} scaleRef={scaleRef} faceParts={faceParts}
+          onHover={handleHover} onHoverEnd={clearCursor}
         />
-        {markers.map((m, i) => (
-          <PointLayer key={i} nodes={nodes} ids={m.ids} displacements={displacements} color={m.color}
-            size={m.size || 7} scaleRef={scaleRef} />
-        ))}
+        <Glyphs layers={glyphs} diag={diag} />
+        <PickCursor position={cursor} size={diag * 0.05} />
         <PointLayer nodes={nodes} ids={minMaxIds.lo} displacements={displacements} color="#2563eb" size={13} scaleRef={scaleRef} />
         <PointLayer nodes={nodes} ids={minMaxIds.hi} displacements={displacements} color="#dc2626" size={13} scaleRef={scaleRef} />
         <PointLayer nodes={nodes} ids={probeNode !== null && probeNode !== undefined ? [probeNode] : []}

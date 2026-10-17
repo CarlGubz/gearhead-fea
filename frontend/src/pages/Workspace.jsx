@@ -15,12 +15,14 @@ import SelectionPanel from "../components/SelectionPanel.jsx";
 import JobPanel from "../components/JobPanel.jsx";
 import ProjectPanel from "../components/ProjectPanel.jsx";
 import MessagesPanel from "../components/MessagesPanel.jsx";
+import AgentPanel from "../components/AgentPanel.jsx";
 import Legend from "../components/Legend.jsx";
 import TreeSection from "../components/TreeSection.jsx";
 import {
   autoScale, boundingBox, buildDisplay, buildTubeView, defaultField, download, facesByAngle, fmt, isLineElement, isStructural,
   minMax, resultsToCSV, resultsToVTK, surfaceNodeIds,
 } from "../components/utils.js";
+import { buildGlyphs } from "../components/glyphs.js";
 import * as api from "../api.js";
 
 function getInitialTheme() {
@@ -80,6 +82,7 @@ export default function Workspace() {
   const [viewCommand, setViewCommand] = useState({ name: "iso", n: 0 });
   const [messages, setMessages] = useState([]);
   const [msgOpen, setMsgOpen] = useState(false);
+  const [agentOpen, setAgentOpen] = useState(false);
   const viewApi = useRef(null);
   const pollRef = useRef(null);
 
@@ -374,14 +377,31 @@ export default function Workspace() {
     }, 700);
   };
 
-  const handleSolve = async () => {
+  /** Start the analysis of `proj` (the manual Solve button and the AI agent both come through here). */
+  const runSolve = async (proj) => {
     setSolving(true);
     clearResults();
-    const j = await guard(api.solve(activeId));
+    const j = await guard(api.solve(proj.id));
     if (!j) { setSolving(false); return; }
     setJob(j);
     notify("Analysis started.");
-    startPolling(j.id, project);
+    startPolling(j.id, proj);
+  };
+  const handleSolve = () => runSolve(project);
+
+  /** The AI agent edited the project on the server: adopt its version and drop stale results/selection. */
+  const handleAgentProject = (p) => {
+    setProject(p);
+    clearResults();
+    clearSel();
+    setHiddenParts(new Set());
+    if (p.elements?.length) loadQuality(p.id);
+    setViewName("iso");
+    notify("The AI assistant updated the model.");
+  };
+  const handleAgentRun = (p) => {
+    notify("The AI assistant started the simulation.");
+    runSolve(p);
   };
 
   /* ---------------------------------------------------------------- exports */
@@ -438,22 +458,7 @@ export default function Workspace() {
   }, [tube, project?.surface_faces, project?.surface_parts, project?.parts, hiddenParts]);
   const surfaceSet = useMemo(
     () => new Set(lineModel ? (project?.elements || []).flat() : surfaceNodeIds(visibleFaces)), [lineModel, project?.elements, visibleFaces]);
-  const markers = useMemo(() => {
-    if (!project) return [];
-    const pick = (ids) => Array.from(new Set(ids)).filter((n) => surfaceSet.has(n)).slice(0, 4000);
-    const thermalOnly = ["thermal", "thermal_transient"].includes(project.analysis_type);
-    const mech = [], temp = [], load = [], heat = [];
-    (project.boundary_conditions || []).forEach((b) =>
-      ((b.bc_type === "temperature" || (!b.bc_type && thermalOnly)) ? temp : mech).push(...(b.node_ids || [])));
-    (project.loads || []).forEach((l) => {
-      const ids = [...(l.node_ids || []), ...(l.faces || []).flat()];
-      (["heat_flux", "surface_flux", "convection", "radiation"].includes(l.load_type) ? heat : load).push(...ids);
-    });
-    return [
-      { ids: pick(mech), color: "#2563eb", size: 8 }, { ids: pick(temp), color: "#0d9488", size: 8 },
-      { ids: pick(load), color: "#dc2626", size: 8 }, { ids: pick(heat), color: "#ea580c", size: 8 },
-    ].filter((m) => m.ids.length);
-  }, [project, surfaceSet]);
+  const glyphs = useMemo(() => (project ? buildGlyphs(project, surfaceSet) : []), [project, surfaceSet]);
 
   const analysisType = project?.analysis_type || "static";
   const oscillate = results?.analysis_type === "modal" || results?.analysis_type === "buckling";
@@ -471,6 +476,8 @@ export default function Workspace() {
         <div className="divider" />
         {health && <span className={`badge ${health.status === "ok" ? "ok" : "warn"}`}>{statusText}</span>}
         <div className="spacer" />
+        <button className={`toolbar-btn ${agentOpen ? "active" : ""}`} style={navBtn} onClick={() => setAgentOpen((o) => !o)}
+          title="Describe a problem in plain language and let the AI build and run the simulation">✦ AI Assistant</button>
         <Link className="toolbar-btn" to="/account" title="Account & billing" style={{ ...navBtn, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis" }}>
           {isPro ? "Pro" : "Free"} · {user?.email}
         </Link>
@@ -544,12 +551,16 @@ export default function Workspace() {
               clip={view.clip} selectedNodes={selNodesView} selectedFaces={selectedFaces} onPickFace={handlePickFace}
               probeMode={view.probeMode && !!display.field} onProbe={(v) => setProbeNode(tube ? tube.baseOf[v] : v)} probeNode={probeNode}
               pickNearest={lineModel} allowFacePick={!lineModel}
-              markers={results ? [] : markers} refPoints={project.reference_points || []} theme={theme} pickMode={pickMode}
+              glyphs={results ? [] : glyphs} refPoints={project.reference_points || []} theme={theme} pickMode={pickMode}
               setPickMode={(m) => { setPickMode(m); setView({ probeMode: false }); }}
               viewCommand={viewCommand} setView={setViewName} onApi={(a) => { viewApi.current = a; }}
             />
           ) : (
-            <div className="empty-state"><p>Select or create a project, then generate or import a mesh.</p></div>
+            <div className="empty-state"><p>Select or create a project, then generate or import a mesh, or open the ✦ AI Assistant and describe your problem.</p></div>
+          )}
+          {agentOpen && (
+            <AgentPanel projectId={activeId} solving={solving} onClose={() => setAgentOpen(false)}
+              onProject={handleAgentProject} onRun={handleAgentRun} />
           )}
           {display.field && <Legend label={display.label} min={fmt(legendRange[0])} max={fmt(legendRange[1])} unit={display.unit} />}
         </main>

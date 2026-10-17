@@ -29,7 +29,7 @@ export default function SelectionPanel({
     <>
       <p className="hint">
         {selectedNodes.length} node(s) · {selectedFaces.length} face(s) selected. Click faces in the viewport (shift = add);
-        use ◪ to select a connected face group by angle.
+        use the face-angle tool to select a connected face group by angle.
       </p>
       <div className="btn-row">
         <button onClick={() => { setSelectedNodes(surf()); setSelectedFaces([]); }}>All nodes</button>
@@ -56,7 +56,7 @@ export default function SelectionPanel({
 
       <h4>By angle</h4>
       <Num label="Max angle between neighbouring faces" unit="°" value={angle} min={0} max={180} onCommit={setAngle} />
-      <p className="hint">Use the ◪ tool, then click a face: the connected faces within this angle are selected.</p>
+      <p className="hint">Use the face-angle tool in the viewport toolbar, then click a face: the connected faces within this angle are selected.</p>
 
       <h4>By node id</h4>
       <input type="text" value={ids} placeholder="e.g. 3, 8-12, 40" onChange={(e) => setIds(e.target.value)} />

@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 
-from . import history, jobs, models, parts as parts_mod, plans, schemas
+from . import agent as agent_mod, history, jobs, models, parts as parts_mod, plans, schemas
 from .config import settings
 from .database import Base, engine, get_db
 from .deps import current_user, owned_project, require_pro_for, tier_of, verify_origin
@@ -29,6 +29,7 @@ from .fea import structural as struct_mod
 from .fea.elements import ELEMENT_TYPES
 from .fea.model import FEMesh
 from .fea.runner import ANALYSIS_TYPES
+from .ratelimit import RateLimiter
 from .routers import auth as auth_router, billing as billing_router
 
 Base.metadata.create_all(bind=engine)
@@ -965,6 +966,33 @@ def add_node_set(payload: schemas.NodeSet, project: models.Project = Depends(own
 def delete_node_set(set_id: str, project: models.Project = Depends(owned_project), db: Session = Depends(get_db)):
     project.node_sets = [s for s in (project.node_sets or []) if s.get("id") != set_id]
     return _commit(db, project, "Delete set")
+
+
+# ----------------------------------------------------------------- AI agent
+_agent_limiter = RateLimiter(settings.agent_requests_per_minute, 60)
+
+
+@app.get("/api/agent/status")
+def agent_status(user: models.User = Depends(current_user)):
+    return {"available": agent_mod.available(), "model": settings.agent_model if agent_mod.available() else None}
+
+
+@app.post("/api/projects/{project_id}/agent/chat")
+def agent_chat(payload: agent_mod.ChatRequest, project: models.Project = Depends(owned_project),
+               user: models.User = Depends(current_user), db: Session = Depends(get_db)):
+    """
+    Chat with the engineering agent. It edits the project with tools and, when the model is complete, answers
+    `run_simulation: true`; the browser then starts the analysis through the normal /solve path.
+    """
+    if payload.messages[-1].role != "user":
+        raise HTTPException(422, "The last message must come from the user")
+    if not agent_mod.available():
+        raise HTTPException(503, "The AI assistant is not configured on this server (set ANTHROPIC_API_KEY).")
+    if not _agent_limiter.hit(f"agent:{user.id}"):
+        raise HTTPException(429, "You are sending messages too quickly. Wait a few seconds and try again.")
+    out = agent_mod.run_agent(db, user, project, [m.model_dump() for m in payload.messages])
+    db.refresh(project)
+    return {**out, "project": schemas.ProjectOut.model_validate(project).model_dump()}
 
 
 # --------------------------------------------------------------------- Jobs

@@ -58,6 +58,12 @@ class Settings:
     # --- plan limits (see plans.py)
     free_max_projects: int = field(default_factory=lambda: _int("FREE_MAX_PROJECTS", 3))
 
+    # --- AI agent (see agent.py). Empty key = the chat assistant is switched off.
+    anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
+    agent_model: str = field(default_factory=lambda: os.getenv("AGENT_MODEL", "claude-sonnet-5-5"))
+    agent_max_turns: int = field(default_factory=lambda: _int("AGENT_MAX_TURNS", 14))
+    agent_requests_per_minute: int = field(default_factory=lambda: _int("AGENT_REQUESTS_PER_MINUTE", 12))
+
     # --- mail
     smtp_host: str = field(default_factory=lambda: os.getenv("SMTP_HOST", ""))
     smtp_port: int = field(default_factory=lambda: _int("SMTP_PORT", 587))

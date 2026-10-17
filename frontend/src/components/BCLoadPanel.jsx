@@ -85,7 +85,7 @@ export default function BCLoadPanel({
   const [refId, setRefId] = useState("");
 
   const refs = refPoints || [];
-  const needText = { nodes: "Select nodes first (◆ tool or the Selection panel).", faces: "Select faces first (▤ tool).", ref: "Create a reference point first (Constraints panel).", none: "" }[active.needs];
+  const needText = { nodes: "Select nodes first (node tool in the viewport toolbar, or the Selection panel).", faces: "Select faces first (face tool in the viewport toolbar).", ref: "Create a reference point first (Constraints panel).", none: "" }[active.needs];
   const ready =
     active.needs === "none" ||
     (active.needs === "nodes" && (selectedNodes.length > 0 || selectedFaces.length > 0)) ||
