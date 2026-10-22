@@ -37,9 +37,11 @@ export function colormap(t) {
 }
 
 /* ---------------------------------------------------------------- the mesh */
+const SELECT_COLOR = [1, 0.17, 0.84]; // magenta: selected nodes (markers) and faces (tint)
+
 function SurfaceMesh({
   nodes, faces, displacements, field, range, deformScale, animate, oscillate,
-  showEdges, showUndeformed, planes, selectedNodes, selectedFaces, onClickFace, scaleRef, faceParts,
+  showEdges, showUndeformed, planes, selectedFaces, hoverTris, onClickFace, scaleRef, faceParts,
   onHover, onHoverEnd,
 }) {
   const base = useMemo(() => {
@@ -81,11 +83,19 @@ function SurfaceMesh({
     return g;
   }, [base]);
 
-  // vertex colours: contour, or plain shading; selection overrides
+  // exactly the selected triangles (by their three node ids), so the tint never bleeds onto neighbouring faces
+  const selectedMask = useMemo(() => {
+    const mask = new Uint8Array(faces.length);
+    if (!selectedFaces || !selectedFaces.length) return mask;
+    const key = (t) => [t[0], t[1], t[2]].sort((a, b) => a - b).join(",");
+    const want = new Set(selectedFaces.map(key));
+    faces.forEach((t, i) => { if (want.has(key(t))) mask[i] = 1; });
+    return mask;
+  }, [faces, selectedFaces]);
+
+  // vertex colours: contour, or plain shading; selected faces override
   useEffect(() => {
     const col = geometry.getAttribute("color");
-    const sel = new Set(selectedNodes || []);
-    (selectedFaces || []).forEach((t) => t.forEach((n) => sel.add(n)));
     let lo = 0;
     let hi = 1;
     if (field && field.length) {
@@ -94,14 +104,49 @@ function SurfaceMesh({
     }
     for (let k = 0; k < base.nv; k++) {
       const n = base.idx[k];
+      const fi = Math.floor(k / 3);
       let c;
-      if (sel.has(n)) c = [1, 0.1, 0.9];
+      if (selectedMask[fi]) c = SELECT_COLOR;
       else if (field && field.length) c = colormap((field[n] - lo) / (hi - lo));
-      else c = PART_COLORS[(faceParts ? faceParts[Math.floor(k / 3)] : 0) % PART_COLORS.length];
+      else c = PART_COLORS[(faceParts ? faceParts[fi] : 0) % PART_COLORS.length];
       col.setXYZ(k, c[0], c[1], c[2]);
     }
     col.needsUpdate = true;
-  }, [geometry, base, field, range, selectedNodes, selectedFaces, faceParts]);
+  }, [geometry, base, field, range, selectedMask, faceParts]);
+
+  // outline of the selected faces: the edges that belong to exactly one selected triangle
+  const outline = useMemo(() => {
+    const count = new Map();
+    const ends = new Map();
+    for (let fi = 0; fi < faces.length; fi++) {
+      if (!selectedMask[fi]) continue;
+      for (let e = 0; e < 3; e++) {
+        const a = faces[fi][e];
+        const b = faces[fi][(e + 1) % 3];
+        const key = a < b ? `${a}_${b}` : `${b}_${a}`;
+        count.set(key, (count.get(key) || 0) + 1);
+        ends.set(key, [fi * 3 + e, fi * 3 + ((e + 1) % 3)]);
+      }
+    }
+    const pairs = [];
+    count.forEach((c, key) => { if (c === 1) pairs.push(ends.get(key)); });
+    if (!pairs.length) return null;
+    const g = new THREE.BufferGeometry();
+    const pos = new THREE.BufferAttribute(new Float32Array(pairs.length * 6), 3);
+    pos.setUsage(THREE.DynamicDrawUsage);
+    g.setAttribute("position", pos);
+    return { geometry: g, pairs };
+  }, [faces, selectedMask]);
+
+  // the hover preview: the triangles (a whole quad on brick meshes) that a click would select
+  const hoverGeometry = useMemo(() => {
+    const g = new THREE.BufferGeometry();
+    const pos = new THREE.BufferAttribute(new Float32Array(6 * 3), 3);
+    pos.setUsage(THREE.DynamicDrawUsage);
+    g.setAttribute("position", pos);
+    g.setDrawRange(0, 0);
+    return g;
+  }, []);
 
   const lastScale = useRef(null);
   useFrame(({ clock }) => {
@@ -133,6 +178,30 @@ function SurfaceMesh({
     lastScale.current = null;
   }, [dispVerts, base]);
 
+  // keep the selection outline and the hover preview on the (possibly deforming) surface; runs after the surface update above
+  const overlayKey = useRef("");
+  useFrame(() => {
+    const p = geometry.getAttribute("position");
+    const key = `${scaleRef.current}|${outline ? outline.geometry.id : "-"}|${hoverTris ? hoverTris.join(",") : "-"}|${animate}`;
+    if (key === overlayKey.current && !animate) return;
+    overlayKey.current = key;
+    if (outline) {
+      const oa = outline.geometry.getAttribute("position");
+      outline.pairs.forEach(([i, j], q) => {
+        for (let c = 0; c < 3; c++) { oa.array[q * 6 + c] = p.array[i * 3 + c]; oa.array[q * 6 + 3 + c] = p.array[j * 3 + c]; }
+      });
+      oa.needsUpdate = true;
+    }
+    if (hoverTris && hoverTris.length) {
+      const ha = hoverGeometry.getAttribute("position");
+      hoverTris.forEach((t, q) => { for (let k = 0; k < 9; k++) ha.array[q * 9 + k] = p.array[t * 9 + k]; });
+      ha.needsUpdate = true;
+      hoverGeometry.setDrawRange(0, hoverTris.length * 3);
+    } else {
+      hoverGeometry.setDrawRange(0, 0);
+    }
+  });
+
   return (
     <>
       <mesh geometry={geometry} onClick={onClickFace} onPointerMove={onHover} onPointerOut={onHoverEnd}>
@@ -144,6 +213,15 @@ function SurfaceMesh({
           <meshBasicMaterial color="#10141c" wireframe transparent opacity={0.35} clippingPlanes={planes} />
         </mesh>
       )}
+      {outline && (
+        <lineSegments geometry={outline.geometry} renderOrder={4} frustumCulled={false}>
+          <lineBasicMaterial color="#2b0a3d" clippingPlanes={planes} polygonOffset polygonOffsetFactor={-2} polygonOffsetUnits={-2} />
+        </lineSegments>
+      )}
+      <mesh geometry={hoverGeometry} renderOrder={3} frustumCulled={false}>
+        <meshBasicMaterial color="#ffd166" transparent opacity={0.6} side={THREE.DoubleSide} clippingPlanes={planes}
+          polygonOffset polygonOffsetFactor={-2} polygonOffsetUnits={-2} depthWrite={false} />
+      </mesh>
       {showUndeformed && dispVerts && (
         <mesh geometry={ghost}>
           <meshBasicMaterial color="#6b7280" wireframe transparent opacity={0.5} clippingPlanes={planes} />
@@ -167,7 +245,7 @@ function getDiscTexture() {
 }
 
 /** Round markers that follow the (animated) deformation: probe, min / max. */
-function PointLayer({ nodes, ids, displacements, color, size = 7, scaleRef }) {
+function PointLayer({ nodes, ids, displacements, color, size = 7, scaleRef, depthTest = false, opacity = 1, disc = true }) {
   const geometry = useMemo(() => {
     const g = new THREE.BufferGeometry();
     g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(ids.length * 3), 3));
@@ -177,6 +255,10 @@ function PointLayer({ nodes, ids, displacements, color, size = 7, scaleRef }) {
     const attr = geometry.getAttribute("position");
     const arr = attr.array;
     const s = scaleRef.current || 0;
+    // only touch the GPU buffer when something moved (thousands of snapping dots would otherwise upload every frame)
+    if (geometry.userData.scale === s && geometry.userData.disp === displacements) return;
+    geometry.userData.scale = s;
+    geometry.userData.disp = displacements;
     ids.forEach((id, k) => {
       const p = nodes[id];
       const d = displacements && displacements[id] ? displacements[id] : [0, 0, 0];
@@ -190,8 +272,8 @@ function PointLayer({ nodes, ids, displacements, color, size = 7, scaleRef }) {
   if (!ids.length) return null;
   return (
     <points geometry={geometry} renderOrder={10} frustumCulled={false}>
-      <pointsMaterial color={color} size={size * 1.5} sizeAttenuation={false} depthTest={false}
-        map={getDiscTexture()} alphaTest={0.5} transparent />
+      <pointsMaterial color={color} size={size * 1.5} sizeAttenuation={false} depthTest={depthTest}
+        map={disc ? getDiscTexture() : null} alphaTest={disc ? 0.5 : 0} transparent opacity={opacity} depthWrite={false} />
     </points>
   );
 }
@@ -246,6 +328,37 @@ function Glyphs({ layers, diag }) {
   const busiest = layers.reduce((n, l) => Math.max(n, l.shape === "cone" ? l.items.length / 2 : l.items.length), 0);
   const size = glyphSize(diag, busiest);
   return layers.map((l, i) => <GlyphLayer key={`${l.shape}-${l.color}-${i}`} layer={l} size={size} />);
+}
+
+/**
+ * Selected nodes as small 3-D spheres (instanced, one draw call). They follow the deformation, are hidden when the node
+ * is on the far side of the model, and stay visible on top for beams / bars where the node sits inside the drawn tube.
+ */
+function NodeMarkers({ nodes, ids, displacements, scaleRef, radius, color, onTop = false }) {
+  const ref = useRef();
+  const m = useMemo(() => new THREE.Matrix4(), []);
+  useFrame(() => {
+    const mesh = ref.current;
+    if (!mesh) return;
+    const s = scaleRef.current || 0;
+    ids.forEach((id, i) => {
+      const p = nodes[id];
+      if (!p) return;
+      const d = displacements && displacements[id] ? displacements[id] : [0, 0, 0];
+      const k = radius / 0.2; // GLYPH_GEOMETRY.sphere has radius 0.2
+      m.makeScale(k, k, k);
+      m.setPosition(p[0] + d[0] * s, p[1] + d[1] * s, p[2] + d[2] * s);
+      mesh.setMatrixAt(i, m);
+    });
+    mesh.count = ids.length;
+    mesh.instanceMatrix.needsUpdate = true;
+  });
+  if (!ids.length) return null;
+  return (
+    <instancedMesh ref={ref} key={ids.length} args={[GLYPH_GEOMETRY.sphere, undefined, ids.length]} renderOrder={12} frustumCulled={false}>
+      <meshBasicMaterial color={color} depthTest={!onTop} />
+    </instancedMesh>
+  );
 }
 
 const AXIS_ARROWS = [
@@ -359,9 +472,10 @@ const niceStep = (x) => {
 export default function Viewport3D({
   nodes, faces, displacements, field, range = null, deformScale = 0, animate = false, oscillate = false,
   showEdges = false, showUndeformed = false, clip = null, showMinMax = false,
-  selectedNodes = [], selectedFaces = [], onPickFace, probeMode = false, onProbe, probeNode = null,
+  selectedNodes = [], selectedFaces = [], onPickFace, onPickNode, probeMode = false, onProbe, probeNode = null,
   glyphs = [], refPoints = [], theme = "dark", pickMode = "none", setPickMode, allowFacePick = false,
   viewCommand, setView, onApi, toolbarExtra, faceParts = null, pickNearest = false,
+  surfaceMid = null, faceSiblings = null,
 }) {
   const colors = GRID_COLORS[theme] || GRID_COLORS.dark;
   const bbox = useMemo(() => boundingBox(nodes), [nodes]);
@@ -393,50 +507,103 @@ export default function Viewport3D({
     return { lo: lo >= 0 ? [lo] : [], hi: hi >= 0 ? [hi] : [] };
   }, [showMinMax, field, faces]);
 
-  /** Mesh vertex (node id + position) of the hit triangle that is closest to the ray hit point. */
-  const nearestVertex = (e) => {
-    const tri = faces[e.faceIndex];
+  /**
+   * The mesh node closest to the ray hit point, among the corners of the hit triangle and - on quadratic meshes - the
+   * mid-side nodes at the centre of its edges. Returns the node id and where it is drawn (deformed position included).
+   */
+  const nearestNode = (e) => {
+    const fi = e.faceIndex;
+    const tri = faces[fi];
     const pos = e.object.geometry.getAttribute("position");
-    let best = 0;
+    const s = scaleRef.current || 0;
+    const cand = tri.map((n, vi) => [n, pos.getX(fi * 3 + vi), pos.getY(fi * 3 + vi), pos.getZ(fi * 3 + vi)]);
+    const mids = surfaceMid && surfaceMid[fi];
+    if (mids) {
+      mids.forEach((m) => {
+        const p = m >= 0 ? nodes[m] : null;
+        if (!p) return;
+        const d = displacements && displacements[m] ? displacements[m] : null;
+        cand.push([m, p[0] + (d ? d[0] * s : 0), p[1] + (d ? d[1] * s : 0), p[2] + (d ? d[2] * s : 0)]);
+      });
+    }
+    let best = cand[0];
     let bd = Infinity;
-    tri.forEach((n, vi) => {
-      const k = e.faceIndex * 3 + vi;
-      const dd = (pos.getX(k) - e.point.x) ** 2 + (pos.getY(k) - e.point.y) ** 2 + (pos.getZ(k) - e.point.z) ** 2;
-      if (dd < bd) { bd = dd; best = vi; }
+    cand.forEach((c) => {
+      const dd = (c[1] - e.point.x) ** 2 + (c[2] - e.point.y) ** 2 + (c[3] - e.point.z) ** 2;
+      if (dd < bd) { bd = dd; best = c; }
     });
-    const k = e.faceIndex * 3 + best;
-    return { id: tri[best], at: [pos.getX(k), pos.getY(k), pos.getZ(k)] };
+    return { id: best[0], at: [best[1], best[2], best[3]] };
   };
 
-  // 3-D pick cursor: snaps to the nearest node in node/probe mode, follows the surface in face modes
+  // 3-D pick cursor: snaps to the nearest node in node/probe mode, follows the surface in face modes.
+  // In the face modes the face (a whole quad on brick meshes) that a click would select is previewed as well.
   const [cursor, setCursor] = useState(null);
+  const [hoverTris, setHoverTris] = useState(null);
   const picking = pickMode !== "none" || probeMode;
+  const faceMode = pickMode === "select-faces" || pickMode === "select-angle";
   const handleHover = (e) => {
     if (!picking || e.faceIndex === undefined || e.faceIndex === null) return;
     e.stopPropagation();
-    const at = pickMode === "select" || probeMode ? nearestVertex(e).at : [e.point.x, e.point.y, e.point.z];
+    const at = pickMode === "select" || probeMode ? nearestNode(e).at : [e.point.x, e.point.y, e.point.z];
     setCursor((c) => (c && c[0] === at[0] && c[1] === at[1] && c[2] === at[2] ? c : at));
+    if (faceMode) {
+      const sib = faceSiblings ? faceSiblings[e.faceIndex] : -1;
+      const next = sib >= 0 ? [e.faceIndex, sib] : [e.faceIndex];
+      setHoverTris((h) => (h && h.length === next.length && h.every((v, i) => v === next[i]) ? h : next));
+    } else if (hoverTris) {
+      setHoverTris(null);
+    }
   };
-  const clearCursor = () => setCursor(null);
-  useEffect(() => { if (!picking) setCursor(null); }, [picking]);
+  const clearCursor = () => { setCursor(null); setHoverTris(null); };
+  useEffect(() => { if (!picking) { setCursor(null); setHoverTris(null); } }, [picking]);
+  useEffect(() => { setHoverTris(null); }, [faces, pickMode]);
 
   const handleClick = (e) => {
     e.stopPropagation();
     const fi = e.faceIndex;
     if (fi === undefined || fi === null) return;
-    const tri = faces[fi];
-    const nearest = () => nearestVertex(e).id;
     if (probeMode && onProbe) {
-      onProbe(nearest());
+      onProbe(nearestNode(e).id);
       return;
     }
-    // beams / bars have no faces: picking selects the end node nearest to the click
-    if (pickNearest && pickMode === "select" && onPickFace) {
-      onPickFace([nearest()], e.shiftKey, fi);
+    if (pickMode === "select") {
+      // one click, one node: the one the cursor is snapped to (beams / bars: the end node nearest to the click)
+      onPickNode?.(nearestNode(e).id, e.shiftKey);
       return;
     }
-    if (onPickFace && pickMode !== "none") onPickFace(tri, e.shiftKey, fi);
+    if (onPickFace && pickMode !== "none") {
+      const sib = faceSiblings ? faceSiblings[fi] : -1;
+      onPickFace(faces[fi], e.shiftKey, fi, sib >= 0 ? faces[sib] : null);
+    }
   };
+
+  // selection markers scale with the mesh: a fraction of the average edge length of the visible surface
+  const markerRadius = useMemo(() => {
+    let sum = 0;
+    let cnt = 0;
+    const step = Math.max(1, Math.floor(faces.length / 400));
+    for (let i = 0; i < faces.length; i += step) {
+      const t = faces[i];
+      for (let k = 0; k < 3; k++) {
+        const a = nodes[t[k]];
+        const b = nodes[t[(k + 1) % 3]];
+        if (!a || !b) continue;
+        sum += Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+        cnt += 1;
+      }
+    }
+    const edge = cnt ? sum / cnt : diag * 0.05;
+    return Math.min(diag * 0.02, Math.max(diag * 0.004, edge * 0.13));
+  }, [faces, nodes, diag]);
+
+  // in node mode every surface node (corners and mid-side nodes) is drawn as a faint dot: these are the snapping targets
+  const pickableIds = useMemo(() => {
+    if (pickMode !== "select" || pickNearest) return [];
+    const s = new Set();
+    faces.forEach((t) => t.forEach((n) => s.add(n)));
+    if (surfaceMid) surfaceMid.forEach((tm) => tm.forEach((m) => { if (m >= 0) s.add(m); }));
+    return s.size <= 40000 ? Array.from(s) : [];
+  }, [pickMode, pickNearest, faces, surfaceMid]);
 
   return (
     <>
@@ -445,9 +612,11 @@ export default function Viewport3D({
           <button className={`toolbar-btn ${pickMode === "none" && !probeMode ? "active" : ""}`}
             title="Orbit / pan / zoom (no selection)" onClick={() => setPickMode("none")}><ToolIcon name="orbit" /></button>
           <button className={`toolbar-btn ${pickMode === "select" ? "active" : ""}`}
-            title="Select nodes: click a face to select its nodes (shift = add)" onClick={() => setPickMode("select")}><ToolIcon name="node" /></button>
+            title="Select nodes: click the node the cursor snaps to (shift = add / remove). Quadratic meshes also offer the mid-side node at the centre of each edge."
+            onClick={() => setPickMode("select")}><ToolIcon name="node" /></button>
           <button className={`toolbar-btn ${pickMode === "select-faces" ? "active" : ""}`}
-            title="Select faces (shift = add)" disabled={!allowFacePick} onClick={() => setPickMode("select-faces")}><ToolIcon name="face" /></button>
+            title="Select faces: the highlighted face is selected on click (shift = add / remove)" disabled={!allowFacePick}
+            onClick={() => setPickMode("select-faces")}><ToolIcon name="face" /></button>
           <button className={`toolbar-btn ${pickMode === "select-angle" ? "active" : ""}`}
             title="Select connected faces by angle (set the angle in the Selection panel)" disabled={!allowFacePick}
             onClick={() => setPickMode("select-angle")}><ToolIcon name="angle" /></button>
@@ -471,12 +640,16 @@ export default function Viewport3D({
         <SurfaceMesh
           nodes={nodes} faces={faces} displacements={displacements} field={field} range={range}
           deformScale={deformScale} animate={animate} oscillate={oscillate} showEdges={showEdges}
-          showUndeformed={showUndeformed} planes={planes} selectedNodes={selectedNodes}
-          selectedFaces={selectedFaces} onClickFace={handleClick} scaleRef={scaleRef} faceParts={faceParts}
+          showUndeformed={showUndeformed} planes={planes} selectedFaces={selectedFaces} hoverTris={hoverTris}
+          onClickFace={handleClick} scaleRef={scaleRef} faceParts={faceParts}
           onHover={handleHover} onHoverEnd={clearCursor}
         />
         <Glyphs layers={glyphs} diag={diag} />
-        <PickCursor position={cursor} size={diag * 0.05} />
+        <PointLayer nodes={nodes} ids={pickableIds} displacements={displacements} color={theme === "dark" ? "#e2e8f0" : "#1e293b"}
+          size={3} scaleRef={scaleRef} depthTest disc={false} opacity={0.85} />
+        <NodeMarkers nodes={nodes} ids={selectedNodes} displacements={displacements} scaleRef={scaleRef} radius={markerRadius}
+          color="#ff2bd6" onTop={pickNearest} />
+        <PickCursor position={cursor} size={Math.min(diag * 0.05, Math.max(diag * 0.018, markerRadius * 6))} />
         <PointLayer nodes={nodes} ids={minMaxIds.lo} displacements={displacements} color="#2563eb" size={13} scaleRef={scaleRef} />
         <PointLayer nodes={nodes} ids={minMaxIds.hi} displacements={displacements} color="#dc2626" size={13} scaleRef={scaleRef} />
         <PointLayer nodes={nodes} ids={probeNode !== null && probeNode !== undefined ? [probeNode] : []}

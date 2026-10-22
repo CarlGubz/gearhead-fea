@@ -19,8 +19,8 @@ import AgentPanel from "../components/AgentPanel.jsx";
 import Legend from "../components/Legend.jsx";
 import TreeSection from "../components/TreeSection.jsx";
 import {
-  autoScale, boundingBox, buildDisplay, buildTubeView, defaultField, download, facesByAngle, fmt, isLineElement, isStructural,
-  minMax, resultsToCSV, resultsToVTK, surfaceNodeIds,
+  ELEMENTS, autoScale, boundingBox, buildDisplay, buildTubeView, defaultField, download, facesByAngle, fmt, isLineElement,
+  isStructural, minMax, resultsToCSV, resultsToVTK, surfaceNodeIds,
 } from "../components/utils.js";
 import { buildGlyphs } from "../components/glyphs.js";
 import * as api from "../api.js";
@@ -63,6 +63,7 @@ export default function Workspace() {
   const navigate = useNavigate();
   const [theme, setTheme] = useState(getInitialTheme);
   const [health, setHealth] = useState(null);
+  const [caps, setCaps] = useState(null);
   const [projects, setProjects] = useState([]);
   const [activeId, setActiveId] = useState(null);
   const [project, setProject] = useState(null);
@@ -184,6 +185,7 @@ export default function Workspace() {
 
   useEffect(() => {
     api.health().then(setHealth).catch(() => setHealth({ status: "unreachable" }));
+    api.capabilities().then(setCaps).catch(() => setCaps(null));
     (async () => {
       const ps = await refreshProjects();
       if (ps.length) selectProject(ps[0].id);
@@ -241,13 +243,15 @@ export default function Workspace() {
     if (text) { download(`${project.name.replace(/[^\w-]+/g, "_")}.inp`, text); notify("Exported a CalculiX/Abaqus-style .inp deck."); }
   };
 
-  const handleGenerate = async (shape, dims, divisions, etype) => {
-    const p = await mutate(api.generatePrimitive(activeId, shape, dims, divisions, etype), { reload: true });
+  const handleGenerate = async (shape, dims, divisions, etype, mesher = "builtin", gmshOpts = null) => {
+    if (mesher === "gmsh") notify("Meshing with Gmsh…");
+    const p = await mutate(api.generatePrimitive(activeId, shape, dims, divisions, etype, mesher, gmshOpts), { reload: true });
     if (p) { clearSel(); setViewName("iso"); notify(`Meshed: ${p.nodes.length} nodes, ${p.elements.length} ${p.element_type} elements.`); }
   };
-  const handleAppend = async (shape, dims, divisions, offset, name, materialId) => {
+  const handleAppend = async (shape, dims, divisions, offset, name, materialId, mesher = "builtin", gmshOpts = null) => {
     const p = await mutate(
-      api.appendPart(activeId, shape, dims, divisions, offset, project.element_type, name, materialId), { reload: true });
+      api.appendPart(activeId, shape, dims, divisions, offset, project.element_type, name, materialId, mesher, gmshOpts),
+      { reload: true });
     if (p) { clearSel(); notify(`Added part “${p.parts[p.parts.length - 1].name}”. The mesh now has ${p.nodes.length} nodes.`); }
   };
 
@@ -327,27 +331,32 @@ export default function Workspace() {
   }, []);
 
   /* --------------------------------------------------------------- picking */
-  const handlePickFace = (rawTri, additive, faceIdx) => {
-    const tri = tube ? Array.from(new Set(rawTri.map((v) => tube.baseOf[v]))) : rawTri;
-    if (pickMode === "select") {
-      setSelectedFaces([]);
-      setSelectedNodes((prev) => {
-        const set = new Set(additive ? prev : []);
-        const all = tri.every((n) => set.has(n));
-        tri.forEach((n) => (all ? set.delete(n) : set.add(n)));
-        return Array.from(set);
-      });
-    } else if (pickMode === "select-faces") {
+  /** Node tool: one click selects the one node the cursor is snapped to; shift adds it, or removes it if it is already selected. */
+  const handlePickNode = (viewId, additive) => {
+    const id = tube ? tube.baseOf[viewId] : viewId;
+    setSelectedFaces([]);
+    setSelectedNodes((prev) => {
+      if (additive) return prev.includes(id) ? prev.filter((n) => n !== id) : [...prev, id];
+      return prev.length === 1 && prev[0] === id ? [] : [id];
+    });
+  };
+
+  /** Face tools. `siblingTri` is the second triangle of the same quadrilateral face on brick meshes: both are selected together. */
+  const handlePickFace = (rawTri, additive, faceIdx, siblingTri = null) => {
+    const sort = (t) => [...t].sort((a, b) => a - b).join(",");
+    const pick = [rawTri, ...(siblingTri ? [siblingTri] : [])];
+    if (pickMode === "select-faces") {
       setSelectedNodes([]);
       setSelectedFaces((prev) => {
-        const key = [...tri].sort().join(",");
-        const exists = prev.some((f) => [...f].sort().join(",") === key);
-        if (exists) return prev.filter((f) => [...f].sort().join(",") !== key);
-        return additive ? [...prev, tri] : [tri];
+        const keys = new Set(pick.map(sort));
+        const exists = prev.some((f) => keys.has(sort(f)));
+        if (exists) return prev.filter((f) => !keys.has(sort(f)));
+        return additive ? [...prev, ...pick] : pick;
       });
     } else if (pickMode === "select-angle" && project) {
       setSelectedNodes([]);
-      setSelectedFaces(facesByAngle(project.surface_faces, project.nodes, visIdx[faceIdx] ?? faceIdx, angle));
+      const found = facesByAngle(project.surface_faces, project.nodes, visIdx[faceIdx] ?? faceIdx, angle);
+      setSelectedFaces(additive ? [...selectedFaces, ...found] : found);
     }
   };
 
@@ -438,31 +447,45 @@ export default function Workspace() {
   }, [tube]);
   const viewDisp = useMemo(() => toView(display.disp), [toView, display.disp]);
   const viewField = useMemo(() => toView(display.field), [toView, display.field]);
-  const selNodesView = useMemo(
-    () => (tube ? selectedNodes.flatMap((n) => [n, ...(tube.ringsOf[n] || [])]) : selectedNodes), [tube, selectedNodes]);
   const selectionFaces = useMemo(
     () => (lineModel ? (project?.elements || []).map(([a, b]) => [a, b, b]) : project?.surface_faces || []),
     [lineModel, project?.elements, project?.surface_faces]);
 
-  const { visibleFaces, visIdx, faceParts } = useMemo(() => {
+  // Brick (and S4 shell) faces are quadrilaterals drawn as two triangles: triangle i and i + N/2 belong to the same quad.
+  const quadFaces = !tube && (ELEMENTS[project?.element_type]?.corners === 8 || project?.element_type === "S4");
+  const { visibleFaces, visIdx, faceParts, visibleMid, faceSiblings } = useMemo(() => {
     const faces = tube ? tube.faces : project?.surface_faces || [];
     const owner = tube ? tube.faceParts : project?.surface_parts || [];
+    const mid = !tube && project?.surface_mid?.length === faces.length ? project.surface_mid : null;
     const plist = project?.parts || [];
-    if (!hiddenParts.size) return { visibleFaces: faces, visIdx: faces.map((_, i) => i), faceParts: owner };
-    const vf = [], vi = [], fp = [];
-    faces.forEach((t, i) => {
-      const pid = plist[owner[i] ?? 0]?.id;
-      if (!hiddenParts.has(pid)) { vf.push(t); vi.push(i); fp.push(owner[i] ?? 0); }
-    });
-    return { visibleFaces: vf, visIdx: vi, faceParts: fp };
-  }, [tube, project?.surface_faces, project?.surface_parts, project?.parts, hiddenParts]);
+    let vf = faces, vi = faces.map((_, i) => i), fp = owner;
+    if (hiddenParts.size) {
+      vf = []; vi = []; fp = [];
+      faces.forEach((t, i) => {
+        const pid = plist[owner[i] ?? 0]?.id;
+        if (!hiddenParts.has(pid)) { vf.push(t); vi.push(i); fp.push(owner[i] ?? 0); }
+      });
+    }
+    let siblings = null;
+    if (quadFaces && faces.length % 2 === 0) {
+      const half = faces.length / 2;
+      const where = new Int32Array(faces.length).fill(-1);
+      vi.forEach((g, k) => { where[g] = k; });
+      siblings = new Int32Array(vi.length);
+      vi.forEach((g, k) => { siblings[k] = where[g < half ? g + half : g - half]; });
+    }
+    return {
+      visibleFaces: vf, visIdx: vi, faceParts: fp, faceSiblings: siblings,
+      visibleMid: mid ? (hiddenParts.size ? vi.map((g) => mid[g]) : mid) : null,
+    };
+  }, [tube, quadFaces, project?.surface_faces, project?.surface_parts, project?.surface_mid, project?.parts, hiddenParts]);
   const surfaceSet = useMemo(
     () => new Set(lineModel ? (project?.elements || []).flat() : surfaceNodeIds(visibleFaces)), [lineModel, project?.elements, visibleFaces]);
   const glyphs = useMemo(() => (project ? buildGlyphs(project, surfaceSet) : []), [project, surfaceSet]);
 
   const analysisType = project?.analysis_type || "static";
   const oscillate = results?.analysis_type === "modal" || results?.analysis_type === "buckling";
-  const statusText = !health ? "Connecting…" : health.status !== "ok" ? "Backend unreachable" : "Standalone solver ready";
+  const statusText = !health ? "Connecting…" : health.status !== "ok" ? "Backend unreachable" : "Ready";
   const loadsCount = (project?.boundary_conditions?.length || 0) + (project?.loads?.length || 0);
   const hasMesh = !!project?.elements?.length;
 
@@ -500,7 +523,7 @@ export default function Workspace() {
             {project && (
               <TreeSection icon="02" title="Geometry & Mesh" defaultOpen={!hasMesh}>
                 <GeometryPanel elementType={project.element_type} quality={quality} hasMesh={hasMesh}
-                  materials={project.materials} defaultMaterial={project.material}
+                  materials={project.materials} defaultMaterial={project.material} gmsh={caps?.gmsh}
                   onGenerate={handleGenerate} onAppend={handleAppend} onImport={handleImportMesh} onImportCad={handleImportCad} />
               </TreeSection>
             )}
@@ -548,7 +571,8 @@ export default function Workspace() {
               nodes={viewNodes} faces={visibleFaces} faceParts={faceParts} displacements={viewDisp} field={viewField}
               range={range} deformScale={view.deformScale} animate={view.animate} oscillate={oscillate}
               showEdges={view.showEdges} showUndeformed={view.showUndeformed} showMinMax={view.showMinMax}
-              clip={view.clip} selectedNodes={selNodesView} selectedFaces={selectedFaces} onPickFace={handlePickFace}
+              clip={view.clip} selectedNodes={selectedNodes} selectedFaces={selectedFaces} onPickFace={handlePickFace}
+              onPickNode={handlePickNode} surfaceMid={visibleMid} faceSiblings={faceSiblings}
               probeMode={view.probeMode && !!display.field} onProbe={(v) => setProbeNode(tube ? tube.baseOf[v] : v)} probeNode={probeNode}
               pickNearest={lineModel} allowFacePick={!lineModel}
               glyphs={results ? [] : glyphs} refPoints={project.reference_points || []} theme={theme} pickMode={pickMode}

@@ -13,6 +13,12 @@ CHUNK = 4000  # elements per batch in vectorised loops (bounds memory)
 _TET10_FLIP = np.array([0, 2, 1, 3, 6, 5, 4, 7, 9, 8])
 
 
+def _reflect_hex(nat: np.ndarray) -> np.ndarray:
+    """Node permutation that mirrors a brick through its mid-plane (zeta -> -zeta): turns an inside-out brick right way round."""
+    key = {tuple(np.round(p, 6)): i for i, p in enumerate(nat)}
+    return np.array([key[(p[0], p[1], -p[2])] for p in np.round(nat, 6)])
+
+
 @dataclass
 class Boundary:
     face_nodes: np.ndarray      # (nf, n_face_nodes) full node lists
@@ -20,6 +26,7 @@ class Boundary:
     tris: np.ndarray            # (nt, 3) outward-wound render triangles (corner nodes)
     tri_face: np.ndarray        # (nt,) index into face_nodes for each triangle
     face_type: str
+    tri_mid: Optional[np.ndarray] = None   # (nt, 3) mid-side node of triangle edges (c0-c1, c1-c2, c2-c0); -1 = none (linear mesh, quad diagonal)
     _lookup: Optional[Dict[Tuple[int, int, int], int]] = field(default=None, repr=False)
 
     def faces_for_triangles(self, tris) -> np.ndarray:
@@ -91,16 +98,24 @@ class FEMesh:
         return out
 
     def ensure_positive_orientation(self) -> int:
-        """Flip inverted tetrahedra in place (tet4/tet10). Returns how many were fixed."""
+        """
+        Flip inside-out elements in place and return how many were fixed. Tetrahedra swap two corners; a brick is
+        mirrored through its mid-plane. A brick whose Jacobian changes sign inside is genuinely distorted: error.
+        """
         fixed = 0
+        if self.et.kind == "tet":
+            perm = _TET10_FLIP if self.et.n_nodes == 10 else np.array([0, 2, 1, 3])
+        else:
+            perm = _reflect_hex(self.et.natural_nodes)
         for sl in self.chunks():
             _, _, _, detJ, _ = self.jacobian(sl)
             bad = np.where(detJ.min(axis=1) <= 0)[0] + (sl.start or 0)
             if len(bad) == 0:
                 continue
             if self.et.kind != "tet":
-                raise ValueError("Mesh contains inverted or degenerate hexahedra")
-            perm = _TET10_FLIP if self.et.n_nodes == 10 else np.array([0, 2, 1, 3])
+                mixed = (detJ.max(axis=1) > 0)[bad - (sl.start or 0)]
+                if mixed.any():
+                    raise ValueError("Mesh contains inverted or degenerate hexahedra")
             self.elems[bad] = self.elems[bad][:, perm]
             fixed += len(bad)
         if fixed:
@@ -162,8 +177,34 @@ class FEMesh:
         else:
             tris = np.vstack([corners[:, [0, 1, 2]], corners[:, [0, 2, 3]]])
             tri_face = np.concatenate([np.arange(len(corners))] * 2)
-        self._boundary = Boundary(face_nodes, elem, tris.astype(np.int64), tri_face, ft.name)
+        tris = tris.astype(np.int64)
+        self._boundary = Boundary(face_nodes, elem, tris, tri_face, ft.name,
+                                  tri_mid=self._triangle_midnodes(face_nodes, tris, ft.n_corner))
         return self._boundary
+
+    def _triangle_midnodes(self, face_nodes: np.ndarray, tris: np.ndarray, nc: int) -> np.ndarray:
+        """
+        Mid-side node on each edge of every render triangle, (nt, 3) = edges c0-c1, c1-c2, c2-c0; -1 where there is none.
+        The viewport uses it so the pick cursor can land on the centre of an edge of a quadratic mesh. Quad-face
+        diagonals carry no node, so those entries stay -1.
+        """
+        out = np.full(tris.shape, -1, dtype=np.int64)
+        if self.et.n_nodes == self.et.n_corner or len(tris) == 0:
+            return out
+        n = np.int64(self.n_nodes)
+        a = face_nodes[:, :nc]
+        b = np.roll(a, -1, axis=1)
+        m = face_nodes[:, nc:2 * nc]                      # edge k joins corner k and k+1 and owns column nc + k
+        keys = (np.minimum(a, b) * n + np.maximum(a, b)).ravel()
+        order = np.argsort(keys, kind="stable")
+        keys, mids = keys[order], m.ravel()[order]
+        for e in range(3):
+            u, v = tris[:, e], tris[:, (e + 1) % 3]
+            q = np.minimum(u, v) * n + np.maximum(u, v)
+            pos = np.clip(np.searchsorted(keys, q), 0, len(keys) - 1)
+            hit = keys[pos] == q
+            out[hit, e] = mids[pos[hit]]
+        return out
 
     def surface_nodes(self) -> np.ndarray:
         return np.unique(self.boundary().face_nodes)

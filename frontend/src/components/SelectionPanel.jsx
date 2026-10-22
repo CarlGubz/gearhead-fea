@@ -28,8 +28,9 @@ export default function SelectionPanel({
   return (
     <>
       <p className="hint">
-        {selectedNodes.length} node(s) · {selectedFaces.length} face(s) selected. Click faces in the viewport (shift = add);
-        use the face-angle tool to select a connected face group by angle.
+        {selectedNodes.length} node(s) · {selectedFaces.length} face(s) selected. With the node tool, click a node (the cursor snaps
+        to it; on quadratic meshes also to the mid-side node at the centre of an edge). With the face tool, click the highlighted face.
+        Shift adds or removes; the face-angle tool selects a connected face group by angle.
       </p>
       <div className="btn-row">
         <button onClick={() => { setSelectedNodes(surf()); setSelectedFaces([]); }}>All nodes</button>

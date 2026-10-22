@@ -1,7 +1,8 @@
 """
 AI engineering agent: turns a plain-language problem statement into a solved FE model.
 
-The agent is a tool-calling loop over the Anthropic Messages API. Its tools are thin wrappers over the same
+The agent is a tool-calling loop over an LLM API: Google Gemini (default, `gemini-2.5-pro`), the Anthropic
+Messages API or OpenRouter (last resort), chosen by `settings.agent_provider`. Its tools are thin wrappers over the same
 handlers the UI uses (mesh generation, material, analysis type, supports, loads, gravity), so everything it
 builds is a normal project edit: it is undoable (Ctrl+Z), respects plan limits and shows up in the model tree.
 
@@ -14,6 +15,8 @@ The HTTP call is isolated in `_post_messages` so tests can replace it without a 
 from __future__ import annotations
 
 import json
+import logging
+import uuid
 from typing import Any, Callable, Dict, List, Optional
 
 import httpx
@@ -31,6 +34,7 @@ API_URL = "https://api.anthropic.com/v1/messages"
 API_VERSION = "2023-06-01"
 MAX_HISTORY = 30
 MAX_MESSAGE_CHARS = 6000
+NOT_CONFIGURED = "The AI assistant is not configured on this server (set GEMINI_API_KEY, ANTHROPIC_API_KEY or OPENROUTER_API_KEY)."
 
 MATERIAL_PRESETS: Dict[str, Dict[str, Any]] = {
     "steel": dict(name="Structural steel", E=210e9, nu=0.30, density=7850, conductivity=50, specific_heat=490,
@@ -51,7 +55,7 @@ MATERIAL_PRESETS: Dict[str, Dict[str, Any]] = {
 
 SYSTEM_PROMPT = """You are the Gearhead FEA engineering agent. A user describes a mechanical or thermal problem in \
 plain language; you build the finite-element model in their project with the tools, check it, and start the \
-simulation. You work inside a PrePoMax-style workspace, so everything you do appears in the model tree and can be \
+simulation. You work inside a FEA workspace, so everything you do appears in the model tree and can be \
 undone by the user.
 
 UNITS: the solver is SI only: metres, newtons, pascals, kilograms, seconds, kelvin/°C. Convert every value the user \
@@ -59,12 +63,13 @@ gives (mm, MPa, kN, ...) before calling a tool. Example: 50 mm = 0.05 m, 250 MPa
 AXES: Z is up and gravity acts along -Z. Box dims are length (x), width (y), height (z); cylinders, spheres and tubes stand along z. Every solid primitive is centred on the origin (a 1 m long box spans x = -0.5 to 0.5), so use face regions (x_min, x_max, ...) rather than guessing coordinates. Structural line/plate models start at the origin or the given points.
 
 WORKFLOW
-1. Read the problem. If something essential is missing or ambiguous (a dimension, the load size, which end is \
-fixed) and no sensible engineering default exists, ask ONE short clarifying question and stop; do not call tools. \
-Otherwise choose reasonable defaults and state them.
+1. Read the problem. The user expects the whole job to run without further input, so fill every gap yourself with a \
+reasonable engineering default (steel if no material is named, static analysis, C3D10 mesh, one end fixed for a \
+cantilever, ...) and state those assumptions in the reply. Only if a dimension or load that decides the whole \
+answer is completely absent and cannot be assumed, ask ONE short clarifying question and stop; do not call tools.
 2. Build in order: geometry+mesh -> material -> analysis type/settings -> supports -> loads -> run_simulation.
-3. Mesh choice: solids use C3D10 (quadratic tets, good for bending) by default; use C3D20 for boxes when accuracy \
-matters; C3D4/C3D8 only for quick checks. 4 to 8 divisions is normally enough. Use structural models (B31 beam, \
+3. Mesh choice: solids use C3D10 (quadratic tets, good for bending) by default; use C3D20 (quadratic bricks, any \
+shape) when accuracy matters; C3D4/C3D8 only for quick checks. 4 to 8 divisions is normally enough. Use structural models (B31 beam, \
 T3D2 truss, S4 shell, SPRING2) for slender members, frames, trusses and thin plates/shells.
 4. Select where supports and loads go with a `region`: {"type":"face","side":"x_min|x_max|y_min|y_max|z_min|z_max"}, \
 {"type":"box","min":[x,y,z],"max":[x,y,z]} (use null for an open side), {"type":"near_point","point":[x,y,z],\
@@ -97,7 +102,7 @@ class ChatRequest(BaseModel):
 
 
 def available() -> bool:
-    return bool(settings.anthropic_api_key)
+    return settings.agent_configured
 
 
 # ------------------------------------------------------------------ geometry helpers
@@ -235,12 +240,17 @@ TOOLS: List[Dict[str, Any]] = [
     {"name": "create_solid_mesh",
      "description": "Replace the model with a meshed solid primitive (clears supports/loads). Dims in metres. "
      "box: length,width,height | cylinder: radius,height | sphere: radius | tube: outer_radius,inner_radius,height | "
-     "plate_hole: length,width,thickness,hole_radius | lbracket: length,height,thickness,depth.",
+     "plate_hole: length,width,thickness,hole_radius | lbracket: length,height,thickness,depth | "
+     "cone: bottom_radius,top_radius,height | torus: major_radius,minor_radius. Every shape accepts every element type "
+     "(bricks C3D8/C3D20 included). Set mesher='gmsh' to mesh with Gmsh instead (optional 'gmsh' options: size in metres, "
+     "algorithm_3d, optimize, refine, regions for local refinement).",
      "input_schema": {"type": "object", "properties": {
          "shape": {"type": "string", "enum": list(meshgen.SHAPES)},
          "dims": {"type": "object", "additionalProperties": {"type": "number"}},
          "divisions": {"type": "integer", "minimum": 1, "maximum": 24},
-         "element_type": {"type": "string", "enum": ["C3D4", "C3D10", "C3D8", "C3D20"]}},
+         "element_type": {"type": "string", "enum": ["C3D4", "C3D10", "C3D8", "C3D20"]},
+         "mesher": {"type": "string", "enum": ["builtin", "gmsh"]},
+         "gmsh": {"type": "object"}},
          "required": ["shape", "dims"]}},
     {"name": "create_structural_model",
      "description": "Replace the model with a beam / truss / shell / spring model. kind: line (x1,y1,z1,x2,y2,z2) | "
@@ -341,8 +351,9 @@ class ToolBox:
     def t_inspect_model(self):
         return {"model": describe_project(self.project)}
 
-    def t_create_solid_mesh(self, shape, dims, divisions=5, element_type="C3D10"):
-        req = schemas.PrimitiveMeshRequest(shape=shape, dims=dims, divisions=divisions, element_type=element_type)
+    def t_create_solid_mesh(self, shape, dims, divisions=5, element_type="C3D10", mesher="builtin", gmsh=None):
+        req = schemas.PrimitiveMeshRequest(shape=shape, dims=dims, divisions=divisions, element_type=element_type,
+                                           mesher=mesher, gmsh=gmsh)
         self.project = self.m.generate_primitive(req, self.project, self.db)
         return {"summary": f"{shape} meshed: {len(self.project.nodes)} nodes, {len(self.project.elements)} "
                            f"{self.project.element_type} elements", "model": describe_project(self.project)}
@@ -437,8 +448,183 @@ class ToolBox:
 
 
 # ------------------------------------------------------------------ LLM transport
+# The loop in `run_agent` speaks one dialect (Anthropic-style: `tool_use` / `tool_result` content blocks). Gemini is
+# supported by translating each request into `generateContent` and each reply back into that dialect, so the tools,
+# the loop and the tests are provider-independent.
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+GEMINI_MIN_OUTPUT_TOKENS = 8192  # Gemini 2.5 Pro "thinks"; thinking tokens count against maxOutputTokens
+log = logging.getLogger("webfea.agent")
+
+
+def _gemini_contents(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    names = {b["id"]: b["name"] for m in messages if isinstance(m["content"], list)
+             for b in m["content"] if b.get("type") == "tool_use"}
+    out: List[Dict[str, Any]] = []
+    for m in messages:
+        role = "model" if m["role"] == "assistant" else "user"
+        if isinstance(m["content"], str):
+            out.append({"role": role, "parts": [{"text": m["content"]}]})
+            continue
+        parts: List[Dict[str, Any]] = []
+        for b in m["content"]:
+            if b.get("type") == "text":
+                if b.get("text"):
+                    parts.append({"text": b["text"]})
+            elif b.get("type") == "tool_use":
+                part: Dict[str, Any] = {"functionCall": {"name": b["name"], "args": b.get("input") or {}}}
+                if b.get("thought_signature"):
+                    part["thoughtSignature"] = b["thought_signature"]
+                parts.append(part)
+            elif b.get("type") == "tool_result":
+                try:
+                    payload = json.loads(b["content"])
+                except (TypeError, ValueError):
+                    payload = {"result": b.get("content")}
+                parts.append({"functionResponse": {"name": names.get(b["tool_use_id"], "tool"),
+                                                   "response": payload if isinstance(payload, dict) else {"result": payload}}})
+        if parts:
+            out.append({"role": role, "parts": parts})
+    return out
+
+
+def _gemini_request(body: Dict[str, Any]) -> Dict[str, Any]:
+    decls = [{"name": t["name"], "description": t["description"],
+              **({"parametersJsonSchema": t["input_schema"]} if t["input_schema"].get("properties") else {})}
+             for t in body.get("tools") or []]
+    req: Dict[str, Any] = {
+        "systemInstruction": {"parts": [{"text": body["system"]}]},
+        "contents": _gemini_contents(body["messages"]),
+        "generationConfig": {"maxOutputTokens": max(int(body.get("max_tokens") or 0), GEMINI_MIN_OUTPUT_TOKENS),
+                             "temperature": 0.2},
+    }
+    if decls:
+        req["tools"] = [{"functionDeclarations": decls}]
+        req["toolConfig"] = {"functionCallingConfig": {"mode": "AUTO"}}
+    return req
+
+
+def _gemini_response(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Gemini generateContent reply -> Anthropic-style {stop_reason, content}."""
+    cands = data.get("candidates") or []
+    if not cands:
+        reason = (data.get("promptFeedback") or {}).get("blockReason")
+        text = "The AI service declined to answer this request." + (f" ({reason})" if reason else "")
+        return {"stop_reason": "end_turn", "content": [{"type": "text", "text": text}]}
+    blocks: List[Dict[str, Any]] = []
+    for i, part in enumerate((cands[0].get("content") or {}).get("parts") or []):
+        if part.get("thought"):
+            continue  # reasoning summary, not an answer
+        if "functionCall" in part:
+            fc = part["functionCall"]
+            blk = {"type": "tool_use", "id": f"call_{uuid.uuid4().hex[:12]}_{i}", "name": fc.get("name", ""),
+                   "input": fc.get("args") or {}}
+            if part.get("thoughtSignature"):
+                blk["thought_signature"] = part["thoughtSignature"]
+            blocks.append(blk)
+        elif part.get("text"):
+            blocks.append({"type": "text", "text": part["text"]})
+    if not blocks and cands[0].get("finishReason") not in (None, "STOP"):
+        blocks.append({"type": "text", "text": f"The AI service stopped without an answer ({cands[0]['finishReason']})."})
+    used = any(b["type"] == "tool_use" for b in blocks)
+    return {"stop_reason": "tool_use" if used else "end_turn", "content": blocks}
+
+
+def _post_gemini(body: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        r = httpx.post(GEMINI_URL.format(model=settings.gemini_model), json=_gemini_request(body),
+                       timeout=httpx.Timeout(120.0, connect=10.0),
+                       headers={"x-goog-api-key": settings.gemini_api_key, "content-type": "application/json"})
+    except httpx.HTTPError:
+        raise HTTPException(502, "Could not reach the AI service. Try again in a moment.")
+    if r.status_code >= 400:
+        log.warning("Gemini %s: %s", r.status_code, r.text[:800])
+    if r.status_code in (401, 403) or (r.status_code == 400 and "API key" in r.text):
+        raise HTTPException(503, "The AI service rejected the server's API key. Ask the administrator to check GEMINI_API_KEY.")
+    if r.status_code == 429:
+        raise HTTPException(429, "The AI service is busy. Try again in a moment.")
+    if r.status_code >= 400:
+        raise HTTPException(502, "The AI service returned an error. Try again in a moment.")
+    return _gemini_response(r.json())
+
+
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+
+def _openrouter_messages(system: str, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = [{"role": "system", "content": system}]
+    for m in messages:
+        if isinstance(m["content"], str):
+            out.append({"role": m["role"], "content": m["content"]})
+        elif m["role"] == "assistant":
+            text = "".join(b.get("text", "") for b in m["content"] if b.get("type") == "text")
+            calls = [{"id": b["id"], "type": "function",
+                      "function": {"name": b["name"], "arguments": json.dumps(b.get("input") or {})}}
+                     for b in m["content"] if b.get("type") == "tool_use"]
+            out.append({"role": "assistant", "content": text or None, **({"tool_calls": calls} if calls else {})})
+        else:
+            for b in m["content"]:
+                if b.get("type") == "tool_result":
+                    out.append({"role": "tool", "tool_call_id": b["tool_use_id"], "content": b["content"]})
+    return out
+
+
+def _openrouter_request(body: Dict[str, Any]) -> Dict[str, Any]:
+    req: Dict[str, Any] = {"model": body["model"], "max_tokens": max(int(body.get("max_tokens") or 0), 4096),
+                           "temperature": 0.2, "messages": _openrouter_messages(body["system"], body["messages"])}
+    if body.get("tools"):
+        req["tools"] = [{"type": "function", "function": {"name": t["name"], "description": t["description"],
+                                                          "parameters": t["input_schema"]}} for t in body["tools"]]
+    return req
+
+
+def _openrouter_response(data: Dict[str, Any]) -> Dict[str, Any]:
+    """OpenAI-style chat completion -> Anthropic-style {stop_reason, content}."""
+    choices = data.get("choices") or []
+    if not choices:
+        msg = (data.get("error") or {}).get("message")
+        return {"stop_reason": "end_turn", "content": [{"type": "text", "text": msg or "The AI service returned no answer."}]}
+    message = choices[0].get("message") or {}
+    blocks: List[Dict[str, Any]] = []
+    if message.get("content"):
+        blocks.append({"type": "text", "text": message["content"]})
+    for i, call in enumerate(message.get("tool_calls") or []):
+        fn = call.get("function") or {}
+        try:
+            args = json.loads(fn.get("arguments") or "{}")
+        except ValueError:
+            args = {}
+        blocks.append({"type": "tool_use", "id": call.get("id") or f"call_{uuid.uuid4().hex[:12]}_{i}",
+                       "name": fn.get("name", ""), "input": args if isinstance(args, dict) else {}})
+    used = any(b["type"] == "tool_use" for b in blocks)
+    return {"stop_reason": "tool_use" if used else "end_turn", "content": blocks}
+
+
+def _post_openrouter(body: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        r = httpx.post(OPENROUTER_URL, json=_openrouter_request(body), timeout=httpx.Timeout(120.0, connect=10.0),
+                       headers={"Authorization": f"Bearer {settings.openrouter_api_key}", "X-Title": "Gearhead FEA",
+                                "HTTP-Referer": settings.app_base_url, "content-type": "application/json"})
+    except httpx.HTTPError:
+        raise HTTPException(502, "Could not reach the AI service. Try again in a moment.")
+    if r.status_code >= 400:
+        log.warning("OpenRouter %s: %s", r.status_code, r.text[:800])
+    if r.status_code in (401, 403):
+        raise HTTPException(503, "The AI service rejected the server's API key. Ask the administrator to check OPENROUTER_API_KEY.")
+    if r.status_code == 429:
+        raise HTTPException(429, "The AI service is busy. Try again in a moment.")
+    if r.status_code >= 400:
+        raise HTTPException(502, "The AI service returned an error. Try again in a moment.")
+    return _openrouter_response(r.json())
+
+
 def _post_messages(body: Dict[str, Any]) -> Dict[str, Any]:
-    """POST one Messages API request. Replaced by tests."""
+    """Send one LLM request through the configured provider. Replaced by tests."""
+    send = {"gemini": _post_gemini, "anthropic": _post_anthropic, "openrouter": _post_openrouter}[settings.agent_provider]
+    return send(body)
+
+
+def _post_anthropic(body: Dict[str, Any]) -> Dict[str, Any]:
+    """POST one Messages API request."""
     try:
         r = httpx.post(API_URL, json=body, timeout=httpx.Timeout(90.0, connect=10.0), headers={
             "x-api-key": settings.anthropic_api_key, "anthropic-version": API_VERSION,
@@ -467,7 +653,7 @@ def run_agent(db: Session, user: models.User, project: models.Project, messages:
               post: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Run the tool loop. Returns {reply, steps, run_simulation}; the project is edited in place."""
     if not available():
-        raise HTTPException(503, "The AI assistant is not configured on this server (ANTHROPIC_API_KEY is missing).")
+        raise HTTPException(503, NOT_CONFIGURED)
     post = post or _post_messages
     box = ToolBox(db, user, project)
     system = f"{SYSTEM_PROMPT}\n\nCURRENT MODEL (live): {json.dumps(describe_project(project))}"
@@ -475,7 +661,7 @@ def run_agent(db: Session, user: models.User, project: models.Project, messages:
     steps: List[Dict[str, Any]] = []
     reply = ""
     for _ in range(max(1, settings.agent_max_turns)):
-        resp = post({"model": settings.agent_model, "max_tokens": 2048, "system": system, "tools": TOOLS,
+        resp = post({"model": settings.agent_active_model, "max_tokens": 2048, "system": system, "tools": TOOLS,
                      "messages": convo})
         blocks = resp.get("content") or []
         text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()

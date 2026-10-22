@@ -1,5 +1,5 @@
 """Pydantic request/response schemas for projects, meshes, models and jobs."""
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -10,11 +10,20 @@ class ProjectCreate(BaseModel):
 
 
 class PrimitiveMeshRequest(BaseModel):
-    """Generate a mesh for a primitive (box, cylinder, sphere, tube, plate_hole, lbracket)."""
+    """
+    Generate a mesh for a primitive (box, cylinder, sphere, tube, plate_hole, lbracket, cone, torus).
+
+    mesher "builtin" uses the structured / Delaunay generators in meshgen.py and `element_type` (C3D4 | C3D10 | C3D8 | C3D20);
+    mesher "gmsh" hands the shape to Gmsh and takes the family / order / algorithms / refinement from `gmsh` (see
+    fea/gmsh_options.py). With Gmsh the element type follows `gmsh.family` and `gmsh.order`, and `divisions` only sets the
+    automatic element size (smallest dimension / divisions) when `gmsh.size` is 0.
+    """
     shape: str
     dims: Dict[str, float] = {}
     divisions: int = Field(default=4, ge=1, le=24)
     element_type: str = "C3D4"   # C3D4 | C3D10 | C3D8 | C3D20
+    mesher: Literal["builtin", "gmsh"] = "builtin"
+    gmsh: Optional[Dict[str, Any]] = None
 
 
 class AppendPartRequest(PrimitiveMeshRequest):
@@ -211,9 +220,18 @@ class NodeSet(BaseModel):
 
 _DEFAULTS = {
     "element_type": "C3D4", "settings": {}, "reference_points": [], "constraints": [], "node_sets": [],
-    "materials": [], "parts": [], "surface_parts": [], "history_pos": -1, "history_labels": [],
+    "materials": [], "parts": [], "surface_parts": [], "surface_mid": [], "history_pos": -1, "history_labels": [],
     "gravity": {"enabled": False, "x": 0.0, "y": 0.0, "z": -9.81},
 }
+
+
+def _legacy_surface_mid(data) -> List[List[int]]:
+    try:
+        from .fea.model import FEMesh
+        mesh = FEMesh(data["nodes"], data["elements"], data["element_type"])
+        return mesh.boundary().tri_mid.tolist()
+    except Exception:  # noqa: BLE001 - picking falls back to corner nodes
+        return []
 
 
 class ProjectOut(BaseModel):
@@ -238,6 +256,7 @@ class ProjectOut(BaseModel):
     materials: List[Dict[str, Any]] = []
     parts: List[Dict[str, Any]] = []
     surface_parts: List[int] = []
+    surface_mid: List[List[int]] = []     # quadratic solids: mid-side node of each render triangle's edges (the pick cursor snaps to them)
     history_pos: int = -1
     history_labels: List[str] = []
 
@@ -255,6 +274,10 @@ class ProjectOut(BaseModel):
                                   "material_id": "default"}]
             if not data.get("surface_parts"):
                 data["surface_parts"] = [0] * len(data.get("surface_faces") or [])
+            # quadratic projects saved before mid-side picking existed: rebuild the table (it is stored again on the next edit)
+            if (not data.get("surface_mid") and data.get("element_type") in ("C3D10", "C3D20")
+                    and len(data.get("surface_faces") or [])):
+                data["surface_mid"] = _legacy_surface_mid(data)
         return handler(data)
 
 

@@ -19,7 +19,7 @@ from . import models
 MAX_STATES = 20
 
 SNAP_FIELDS = [
-    "nodes", "elements", "element_type", "surface_faces", "surface_parts", "parts", "materials", "material",
+    "nodes", "elements", "element_type", "surface_faces", "surface_parts", "surface_mid", "parts", "materials", "material",
     "boundary_conditions", "loads", "constraints", "reference_points", "node_sets", "settings",
     "analysis_type", "n_modes", "gravity",
 ]
@@ -91,6 +91,8 @@ def _restore(db: Session, project: models.Project, seq: int) -> None:
     for f in SNAP_FIELDS:
         if f in state:
             setattr(project, f, state[f])
+        elif f == "surface_mid":          # snapshots from before quadratic picking: rebuilt on demand (see schemas.ProjectOut)
+            project.surface_mid = []
     project.history_pos = seq
 
 

@@ -290,6 +290,10 @@ def test_capabilities_and_validation(pro):
     p = make_project(pro)
     assert pro.put(f"/api/projects/{p['id']}/settings", json={"bogus": 1}).status_code == 422
     assert pro.put(f"/api/projects/{p['id']}/material", json={"E": -1}).status_code == 422
+    # curved shapes used to be tetrahedra-only; bricks are now available for every primitive
     r = pro.post(f"/api/projects/{p['id']}/mesh/primitive", json={"shape": "cylinder", "dims": {}, "element_type": "C3D8"})
-    assert r.status_code == 400 and "hexahedra" in r.json()["detail"]
+    assert r.status_code == 200 and r.json()["element_type"] == "C3D8"
+    r = pro.post(f"/api/projects/{p['id']}/mesh/primitive",
+                 json={"shape": "tube", "dims": {"outer_radius": 0.2, "inner_radius": 0.3}, "element_type": "C3D20"})
+    assert r.status_code == 400 and "inner radius" in r.json()["detail"]
     assert pro.post(f"/api/projects/{p['id']}/bcs", json={"name": "x", "node_ids": [10 ** 9], "dofs": [0]}).status_code == 422

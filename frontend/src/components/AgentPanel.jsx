@@ -66,7 +66,7 @@ export default function AgentPanel({ projectId, onClose, onProject, onRun, solvi
   return (
     <div className="agent-drawer" role="dialog" aria-label="AI engineering assistant">
       <div className="agent-head">
-        <strong>✦ AI engineering assistant</strong>
+        <strong>✦ Gearhead AI</strong>
         <span className="spacer" />
         {chat.length > 0 && <button title="Start a new conversation" onClick={() => setChat([])} disabled={busy}>Clear</button>}
         <button title="Close" onClick={onClose}>✕</button>
@@ -105,8 +105,8 @@ export default function AgentPanel({ projectId, onClose, onProject, onRun, solvi
       )}
       {off && (
         <p className="agent-hint">
-          {/* The assistant is switched off on this server. The administrator must set <code>ANTHROPIC_API_KEY</code> (see the README). */}
-          pakiset ng API dtio (.env), hmm chinese models for now.
+          The assistant is switched off on this server. The administrator must set <code>GEMINI_API_KEY</code> in the
+          backend <code>.env</code> and restart (see the README).
         </p>
       )}
       {!projectId && !off && <p className="agent-hint">Select or create a project first.</p>}

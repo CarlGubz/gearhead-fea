@@ -376,7 +376,7 @@ def import_inp(text: str) -> FEMesh:
 
 
 def import_msh(text: str) -> FEMesh:
-    """Gmsh ASCII format 2.2: tetrahedra (type 4, 11) and hexahedra (type 5)."""
+    """Gmsh ASCII format 2.2: tetrahedra (type 4, 11) and hexahedra (type 5, 17). Other versions / binary: see cad.mesh_msh."""
     sec = {}
     cur, buf = None, []
     for ln in text.splitlines():
@@ -406,14 +406,16 @@ def import_msh(text: str) -> FEMesh:
         p = [int(x) for x in ln.split()]
         etype, ntags = p[1], p[2]
         by_type.setdefault(etype, []).append([remap[x] for x in p[3 + ntags:]])
-    solids = {k: v for k, v in by_type.items() if k in (4, 11, 5)}
+    solids = {k: v for k, v in by_type.items() if k in (4, 11, 5, 17)}
     if len(solids) != 1:
-        raise InpError("The mesh must contain exactly one solid element type (tetra4, tetra10 or hexa8)")
+        raise InpError("The mesh must contain exactly one solid element type (tetra4, tetra10, hexa8 or hexa20)")
     (gtype, rows), = solids.items()
     arr = np.array(rows, dtype=np.int64)
     if gtype == 11:
         arr = arr[:, [0, 1, 2, 3, 4, 5, 6, 7, 9, 8]]  # gmsh edge order -> Abaqus order
-    name = {4: "C3D4", 11: "C3D10", 5: "C3D8"}[gtype]
+    if gtype == 17:
+        arr = arr[:, [0, 1, 2, 3, 4, 5, 6, 7, 8, 11, 13, 9, 16, 18, 19, 17, 10, 12, 14, 15]]  # gmsh hex20 edge order -> Abaqus order
+    name = {4: "C3D4", 11: "C3D10", 5: "C3D8", 17: "C3D20"}[gtype]
     mesh = FEMesh(np.array(pts), arr, name)
     mesh.ensure_positive_orientation()
     return mesh

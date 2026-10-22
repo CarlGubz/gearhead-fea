@@ -1,6 +1,15 @@
 """
-Mesh generators for the built-in primitives: structured hexahedra (C3D8/C3D20) where the geometry
-allows it, Delaunay tetrahedra (C3D4/C3D10) for curved shapes, plus linear -> quadratic conversion.
+Mesh generators for the built-in primitives. Every primitive can be meshed with any of the four solid element types:
+
+* hexahedra (C3D8 / C3D20): structured grids. Boxes and L-brackets use a Cartesian grid; cylinders, cones, spheres, tubes,
+  plates with a hole and tori use mapped structured grids (square -> disc "elliptical" mapping, cube -> ball mapping,
+  polar rings, an O-grid around the hole) so the bricks follow the curved surface without a collapsed axis;
+* tetrahedra (C3D4 / C3D10): the box / L-bracket / cone / torus grids are split into six tets per brick (Freudenthal, so
+  neighbouring bricks stay conforming), cylinder / sphere / tube / plate-with-hole use a Delaunay point cloud;
+* quadratic elements (C3D10 / C3D20) come from the linear mesh by adding mid-side nodes; on curved shapes those are
+  moved back onto the true surface so the geometry is second-order accurate.
+
+The same primitives can also be meshed by Gmsh (see gmsh_mesher.py) with all of its algorithm / recombination options.
 """
 from __future__ import annotations
 
@@ -21,6 +30,20 @@ SHAPES = {
     "tube": "Tube (hollow cylinder)",
     "plate_hole": "Plate with hole",
     "lbracket": "L-bracket",
+    "cone": "Cone (frustum)",
+    "torus": "Torus",
+}
+
+# default dimensions (metres), shared by the UI, the API docs and the Gmsh mesher
+DEFAULT_DIMS = {
+    "box": {"length": 1.0, "width": 0.2, "height": 0.2},
+    "cylinder": {"radius": 0.5, "height": 1.0},
+    "sphere": {"radius": 0.5},
+    "tube": {"outer_radius": 0.5, "inner_radius": 0.3, "height": 1.0},
+    "plate_hole": {"length": 1.0, "width": 0.5, "thickness": 0.1, "hole_radius": 0.1},
+    "lbracket": {"length": 1.0, "height": 1.0, "thickness": 0.25, "depth": 0.25},
+    "cone": {"bottom_radius": 0.5, "top_radius": 0.25, "height": 1.0},
+    "torus": {"major_radius": 0.5, "minor_radius": 0.15},
 }
 
 # Freudenthal split of a unit cube into 6 tets (conforming across neighbouring cubes)
@@ -153,16 +176,20 @@ def generate(shape: str, dims: Dict[str, float], divisions: int = 4,
         zs = seg(0, d)
         nodes, hexes = _grid_hex(xs, ys, zs, keep=lambda c: ~((c[:, 0] > t) & (c[:, 1] > t)))
         base = _finish_structured(nodes, hexes, et.name)
-    elif shape in ("cylinder", "sphere", "tube", "plate_hole"):
-        pts, keep = _curved_points(shape, dims, div)
-        tets = _delaunay_tets(pts, keep)
-        nodes, tets = _compress(pts, tets)
-        mesh = FEMesh(nodes, tets, "C3D4")
-        mesh.ensure_positive_orientation()
-        if et.kind == "hex":
-            raise ValueError(f"{shape} cannot be meshed with hexahedra; choose a tetrahedral element type")
-        base = to_quadratic(mesh) if et.name == "C3D10" else mesh
-        _project_midside(base, shape, dims, div)
+    elif shape in ("cylinder", "sphere", "tube", "plate_hole", "cone", "torus"):
+        if et.kind == "hex" or shape in ("cone", "torus"):
+            nodes, hexes, surfaces = _curved_hex(shape, dims, div)
+            nodes, hexes = _positive_hexes(nodes, hexes)
+            base = _finish_structured(nodes, hexes, et.name)
+            project_to_surfaces(base, surfaces)
+        else:
+            pts, keep = _curved_points(shape, dims, div)
+            tets = _delaunay_tets(pts, keep)
+            nodes, tets = _compress(pts, tets)
+            mesh = FEMesh(nodes, tets, "C3D4")
+            mesh.ensure_positive_orientation()
+            base = to_quadratic(mesh) if et.name == "C3D10" else mesh
+            _project_midside(base, shape, dims, div)
     else:
         raise ValueError(f"Unknown primitive shape '{shape}'. Available: {', '.join(SHAPES)}")
 
@@ -178,6 +205,203 @@ def _finish_structured(nodes, hexes, name: str) -> FEMesh:
         return to_quadratic(m) if name == "C3D20" else m
     m = FEMesh(nodes, hex8_to_tet4(nodes, hexes), "C3D4")
     return to_quadratic(m) if name == "C3D10" else m
+
+
+def _positive_hexes(nodes: np.ndarray, hexes: np.ndarray):
+    """Make every brick right-handed (a mapped grid can come out mirrored as a whole)."""
+    m = FEMesh(nodes, hexes.copy(), "C3D8")
+    m.ensure_positive_orientation()
+    return nodes, m.elems
+
+
+def _structured_hex(P: np.ndarray, periodic=(False, False, False)) -> Tuple[np.ndarray, np.ndarray]:
+    """Bricks of a logical (ni, nj, nk) grid of node positions P[ni, nj, nk, 3]; a periodic axis wraps around (ring / torus)."""
+    ni, nj, nk = P.shape[:3]
+    ids = np.arange(ni * nj * nk).reshape(ni, nj, nk)
+    ei, ej, ek = (n if per else n - 1 for n, per in zip((ni, nj, nk), periodic))
+    i, j, k = (a.ravel() for a in np.meshgrid(np.arange(ei), np.arange(ej), np.arange(ek), indexing="ij"))
+    i1, j1, k1 = (i + 1) % ni, (j + 1) % nj, (k + 1) % nk
+    hexes = np.stack([ids[i, j, k], ids[i1, j, k], ids[i1, j1, k], ids[i, j1, k],
+                      ids[i, j, k1], ids[i1, j, k1], ids[i1, j1, k1], ids[i, j1, k1]], axis=1)
+    return P.reshape(-1, 3), hexes
+
+
+def _square_to_disc(s: np.ndarray, t: np.ndarray):
+    """Elliptical grid mapping of the square [-1, 1]^2 onto the unit disc: smooth grid lines, no collapsed node."""
+    return s * np.sqrt(1.0 - 0.5 * t * t), t * np.sqrt(1.0 - 0.5 * s * s)
+
+
+def _cube_to_ball(x: np.ndarray, y: np.ndarray, z: np.ndarray):
+    """Mapping of the cube [-1, 1]^3 onto the unit ball (positive Jacobian everywhere, the cube faces land on the sphere)."""
+    return (x * np.sqrt(1.0 - 0.5 * y * y - 0.5 * z * z + y * y * z * z / 3.0),
+            y * np.sqrt(1.0 - 0.5 * z * z - 0.5 * x * x + z * z * x * x / 3.0),
+            z * np.sqrt(1.0 - 0.5 * x * x - 0.5 * y * y + x * x * y * y / 3.0))
+
+
+# Curved surfaces as (signed distance, projection onto the surface); used to move mid-side nodes of quadratic meshes.
+def _surf_cylinder(r):
+    def proj(p):
+        q = p.copy()
+        rho = np.maximum(np.hypot(p[:, 0], p[:, 1]), 1e-300)
+        q[:, 0] *= r / rho
+        q[:, 1] *= r / rho
+        return q
+    return (lambda p: np.hypot(p[:, 0], p[:, 1]) - r), proj
+
+
+def _surf_sphere(r):
+    return ((lambda p: np.linalg.norm(p, axis=1) - r),
+            lambda p: p * (r / np.maximum(np.linalg.norm(p, axis=1), 1e-300))[:, None])
+
+
+def _surf_cone(rb, rt, h):
+    radius = lambda z: rb + (rt - rb) * (z + h / 2) / h  # noqa: E731
+
+    def proj(p):
+        q = p.copy()
+        f = radius(p[:, 2]) / np.maximum(np.hypot(p[:, 0], p[:, 1]), 1e-300)
+        q[:, 0] *= f
+        q[:, 1] *= f
+        return q
+    return (lambda p: np.hypot(p[:, 0], p[:, 1]) - radius(p[:, 2])), proj
+
+
+def _surf_torus(R, r):
+    def core(p):
+        rho = np.maximum(np.hypot(p[:, 0], p[:, 1]), 1e-300)
+        return np.stack([p[:, 0] * R / rho, p[:, 1] * R / rho, np.zeros(len(p))], axis=1)
+
+    def proj(p):
+        c = core(p)
+        d = p - c
+        return c + d * (r / np.maximum(np.linalg.norm(d, axis=1), 1e-300))[:, None]
+    return (lambda p: np.linalg.norm(p - core(p), axis=1) - r), proj
+
+
+def _curved_hex(shape: str, dims: Dict[str, float], div: int):
+    """Structured bricks for the curved primitives. Returns (nodes, bricks, curved surfaces for mid-side projection)."""
+    get = lambda k, d: float(dims.get(k, d))  # noqa: E731
+    lin = lambda n: np.linspace(-1.0, 1.0, n + 1)  # noqa: E731
+    if shape in ("cylinder", "cone"):
+        if shape == "cylinder":
+            rb = rt = get("radius", 0.5)
+        else:
+            rb, rt = get("bottom_radius", 0.5), get("top_radius", 0.25)
+        h = get("height", 1.0)
+        n = max(2, 2 * div)
+        nz = _count(div, h, min(2 * max(rb, rt), h))
+        S, T = np.meshgrid(lin(n), lin(n), indexing="ij")
+        U, V = _square_to_disc(S, T)
+        z = np.linspace(-h / 2, h / 2, nz + 1)
+        rz = rb + (rt - rb) * (z + h / 2) / h
+        P = np.stack([U[:, :, None] * rz, V[:, :, None] * rz, np.broadcast_to(z, (n + 1, n + 1, nz + 1))], axis=3)
+        nodes, hexes = _structured_hex(P)
+        return nodes, hexes, [_surf_cylinder(rb) if shape == "cylinder" else _surf_cone(rb, rt, h)]
+    if shape == "sphere":
+        r = get("radius", 0.5)
+        n = max(2, 2 * div)
+        X, Y, Z = np.meshgrid(lin(n), lin(n), lin(n), indexing="ij")
+        nodes, hexes = _structured_hex(r * np.stack(_cube_to_ball(X, Y, Z), axis=3))
+        return nodes, hexes, [_surf_sphere(r)]
+    if shape == "tube":
+        ro, ri, h = get("outer_radius", 0.5), get("inner_radius", 0.3), get("height", 1.0)
+        if ri >= ro:
+            raise ValueError("Tube inner radius must be smaller than the outer radius")
+        ref = min(ro - ri, h)
+        nr, nz, nt = _count(div, ro - ri, ref), _count(div, h, ref), max(8, 4 * div)
+        R, TH, Z = np.meshgrid(np.linspace(ri, ro, nr + 1), np.linspace(0.0, 2 * np.pi, nt, endpoint=False),
+                               np.linspace(-h / 2, h / 2, nz + 1), indexing="ij")
+        nodes, hexes = _structured_hex(np.stack([R * np.cos(TH), R * np.sin(TH), Z], axis=3), periodic=(False, True, False))
+        return nodes, hexes, [_surf_cylinder(ro), _surf_cylinder(ri)]
+    if shape == "plate_hole":
+        L, W, T, rh = get("length", 1.0), get("width", 0.5), get("thickness", 0.1), get("hole_radius", 0.1)
+        if 2 * rh >= min(L, W):
+            raise ValueError("Hole diameter must be smaller than the plate width")
+        h = min(L, W) / (2 * max(2, div))
+        mx, my = max(2, int(round(L / h))), max(2, int(round(W / h)))
+        # outer boundary, counter-clockwise from the lower-left corner; the four corners are nodes
+        bx, by = np.linspace(-L / 2, L / 2, mx + 1), np.linspace(-W / 2, W / 2, my + 1)
+        outer = np.vstack([
+            np.stack([bx[:-1], np.full(mx, -W / 2)], axis=1), np.stack([np.full(my, L / 2), by[:-1]], axis=1),
+            np.stack([bx[:0:-1], np.full(mx, W / 2)], axis=1), np.stack([np.full(my, -L / 2), by[:0:-1]], axis=1)])
+        ang = np.arctan2(outer[:, 1], outer[:, 0])
+        inner = rh * np.stack([np.cos(ang), np.sin(ang)], axis=1)       # same angle on the hole -> straight radial lines
+        nr = max(2, int(round((min(L, W) / 2 - rh) / h)))
+        nz = max(1, int(round(T / h)))
+        s = np.linspace(0.0, 1.0, nr + 1)[:, None, None]
+        ring = (1 - s) * inner[None] + s * outer[None]                   # (nr + 1, around, 2)
+        P = np.empty((nr + 1, len(outer), nz + 1, 3))
+        P[..., 0] = ring[:, :, None, 0]
+        P[..., 1] = ring[:, :, None, 1]
+        P[..., 2] = np.linspace(-T / 2, T / 2, nz + 1)
+        nodes, hexes = _structured_hex(P, periodic=(False, True, False))
+        return nodes, hexes, [_surf_cylinder(rh)]
+    if shape == "torus":
+        R, r = get("major_radius", 0.5), get("minor_radius", 0.15)
+        if r >= R:
+            raise ValueError("Torus minor radius must be smaller than the major radius")
+        n = max(2, 2 * div)
+        S, T = np.meshgrid(lin(n), lin(n), indexing="ij")
+        U, V = _square_to_disc(S, T)
+        phi = np.linspace(0.0, 2 * np.pi, max(12, 6 * div), endpoint=False)
+        rho = R + r * U[:, :, None]
+        P = np.stack([rho * np.cos(phi), rho * np.sin(phi),
+                      np.broadcast_to(r * V[:, :, None], (n + 1, n + 1, len(phi)))], axis=3)
+        nodes, hexes = _structured_hex(P, periodic=(False, False, True))
+        return nodes, hexes, [_surf_torus(R, r)]
+    raise ValueError(f"No brick generator for '{shape}'")
+
+
+def project_to_surfaces(mesh: FEMesh, surfaces) -> None:
+    """
+    Put the boundary mid-side nodes of a quadratic mesh back onto the true curved surfaces. A mid-node moves only if it
+    lies on the mesh boundary and both end nodes of its edge are on that surface (interior edges are never touched).
+
+    On a very coarse mesh the full move can fold an element (the chord is long compared with the element). Nodes of a folded
+    element are then moved only part of the way, halving the move until every element is valid again.
+    """
+    et = mesh.et
+    if et.n_nodes == et.n_corner or not surfaces:
+        return
+    edges = _HEX_EDGES if et.kind == "hex" else _TET_EDGES
+    surf = np.zeros(mesh.n_nodes, dtype=bool)
+    surf[mesh.surface_nodes()] = True
+    p = mesh.nodes
+    base = p.copy()
+    target = p.copy()
+    moved = np.zeros(mesh.n_nodes, dtype=bool)
+    tol = 1e-6 * float(np.linalg.norm(np.ptp(p, axis=0)) or 1.0)
+    for dist, proj in surfaces:
+        for m_idx, (i, j) in enumerate(edges):
+            mid = mesh.elems[:, et.n_corner + m_idx]
+            a, b = mesh.elems[:, i], mesh.elems[:, j]
+            sel = surf[mid] & (np.abs(dist(p[a])) < tol) & (np.abs(dist(p[b])) < tol)
+            ids = np.unique(mid[sel])
+            if len(ids):
+                target[ids] = proj(base[ids])
+                moved[ids] = True
+    share = moved.astype(float)                                 # how far each mid-node moves towards its target (0..1)
+    for attempt in range(8):
+        p[:] = base + share[:, None] * (target - base)
+        folded = _folded_elements(mesh)
+        if not len(folded):
+            return
+        nodes = np.unique(mesh.elems[folded][:, et.n_corner:])
+        nodes = nodes[moved[nodes] & (share[nodes] > 0)]
+        if not len(nodes):
+            return
+        share[nodes] = 0.0 if attempt == 7 else share[nodes] * 0.5
+    p[:] = base + share[:, None] * (target - base)
+
+
+def _folded_elements(mesh: FEMesh) -> np.ndarray:
+    """Elements whose Jacobian is zero or changes sign somewhere inside (orientation-agnostic)."""
+    out = []
+    for sl in mesh.chunks():
+        _, _, _, detJ, _ = mesh.jacobian(sl)
+        bad = np.where(detJ.min(axis=1) * detJ.max(axis=1) <= 0)[0] + (sl.start or 0)
+        out.append(bad)
+    return np.concatenate(out) if out else np.zeros(0, dtype=np.int64)
 
 
 def _curved_points(shape: str, dims: Dict[str, float], n: int):

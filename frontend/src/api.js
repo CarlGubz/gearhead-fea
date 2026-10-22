@@ -49,10 +49,13 @@ export const createProject = (name, description = "") =>
 export const getProject = (id) => api.get(`/projects/${id}`).then((r) => r.data);
 export const deleteProject = (id) => api.delete(`/projects/${id}`).then((r) => r.data);
 
-export const generatePrimitive = (id, shape, dims, divisions, element_type = "C3D4") =>
-  api.post(`/projects/${id}/mesh/primitive`, { shape, dims, divisions, element_type }).then((r) => r.data);
-export const appendPart = (id, shape, dims, divisions, offset, element_type, name, material_id) =>
-  api.post(`/projects/${id}/mesh/append`, { shape, dims, divisions, offset, element_type, name, material_id }).then((r) => r.data);
+// mesher "builtin" (structured / Delaunay generators) or "gmsh" (with the Gmsh options object, see GmshOptions.jsx)
+export const generatePrimitive = (id, shape, dims, divisions, element_type = "C3D4", mesher = "builtin", gmsh = null) =>
+  api.post(`/projects/${id}/mesh/primitive`, { shape, dims, divisions, element_type, mesher, ...(gmsh ? { gmsh } : {}) },
+    { timeout: mesher === "gmsh" ? 240000 : undefined }).then((r) => r.data);
+export const appendPart = (id, shape, dims, divisions, offset, element_type, name, material_id, mesher = "builtin", gmsh = null) =>
+  api.post(`/projects/${id}/mesh/append`, { shape, dims, divisions, offset, element_type, name, material_id, mesher, ...(gmsh ? { gmsh } : {}) },
+    { timeout: mesher === "gmsh" ? 240000 : undefined }).then((r) => r.data);
 export const generateStructural = (id, body) => api.post(`/projects/${id}/mesh/structural`, body).then((r) => r.data);
 export const appendStructural = (id, body) => api.post(`/projects/${id}/mesh/structural/append`, body).then((r) => r.data);
 export const customStructural = (id, body) => api.post(`/projects/${id}/mesh/structural/custom`, body).then((r) => r.data);
@@ -69,12 +72,14 @@ export const importMesh = (id, file) => {
   form.append("file", file);
   return api.post(`/projects/${id}/mesh/import`, form).then((r) => r.data);
 };
-export const importCad = (id, file, { size = 0, order = 2, unit = "mm" } = {}) => {
+export const importCad = (id, file, { size = 0, order = 2, unit = "mm", family = "tet", options = null } = {}) => {
   const form = new FormData();
   form.append("file", file);
   form.append("size", String(size));
   form.append("order", String(order));
   form.append("unit", unit);
+  form.append("family", family);
+  if (options) form.append("options", JSON.stringify(options));
   return api.post(`/projects/${id}/mesh/cad`, form, { timeout: 240000 }).then((r) => r.data);
 };
 export const meshQuality = (id) => api.get(`/projects/${id}/mesh/quality`).then((r) => r.data);

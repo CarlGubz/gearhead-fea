@@ -139,6 +139,7 @@ class Project(Base):
     materials = Column(JSON, default=list)           # extra material library entries; "default" = `material`
     parts = Column(JSON, default=list)               # [{id, name, elem_start, elem_end, material_id}]
     surface_parts = Column(JSON, default=list)       # part index of every render triangle
+    surface_mid = Column(JSON, default=list)         # quadratic meshes: mid-side node of each render triangle's 3 edges (-1 = none)
 
     # --- undo / redo (see history.py) ---
     history_pos = Column(Integer, default=-1)        # index of the current state, -1 = no history yet

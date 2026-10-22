@@ -12,6 +12,30 @@ from dataclasses import dataclass, field
 from typing import List
 
 
+def _load_dotenv() -> None:
+    """Read KEY=VALUE lines from backend/.env or the repo-root .env. Real environment variables win."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for path in (os.path.join(here, "..", ".env"), os.path.join(here, "..", "..", ".env")):
+        try:
+            with open(path, encoding="utf-8-sig") as fh:
+                lines = fh.read().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            val = val.strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                val = val[1:-1]
+            if val:  # an empty `KEY=` placeholder must not shadow anything
+                os.environ.setdefault(key.strip(), val)
+
+
+_load_dotenv()
+
+
 def _bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -58,9 +82,15 @@ class Settings:
     # --- plan limits (see plans.py)
     free_max_projects: int = field(default_factory=lambda: _int("FREE_MAX_PROJECTS", 3))
 
-    # --- AI agent (see agent.py). Empty key = the chat assistant is switched off.
+    # --- AI agent (see agent.py). No key for the chosen provider = the chat assistant is switched off.
+    # AGENT_PROVIDER: gemini | anthropic | openrouter | (empty = first of those with a key, in that order)
+    agent_provider_setting: str = field(default_factory=lambda: os.getenv("AGENT_PROVIDER", "").strip().lower())
+    gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
+    gemini_model: str = field(default_factory=lambda: os.getenv("GEMINI_MODEL", "gemini-2.5-pro"))
     anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
     agent_model: str = field(default_factory=lambda: os.getenv("AGENT_MODEL", "claude-sonnet-5-5"))
+    openrouter_api_key: str = field(default_factory=lambda: os.getenv("OPENROUTER_API_KEY", ""))
+    openrouter_model: str = field(default_factory=lambda: os.getenv("OPENROUTER_MODEL", "google/gemini-2.5-pro"))
     agent_max_turns: int = field(default_factory=lambda: _int("AGENT_MAX_TURNS", 14))
     agent_requests_per_minute: int = field(default_factory=lambda: _int("AGENT_REQUESTS_PER_MINUTE", 12))
 
@@ -75,6 +105,32 @@ class Settings:
         # cookie_secure defaults to "on in production", overridable by env.
         if self.cookie_secure is None:
             self.cookie_secure = _bool("COOKIE_SECURE", self.app_env == "production")
+
+    @property
+    def agent_provider(self) -> str:
+        """Which LLM drives the assistant: 'gemini', 'anthropic' or 'openrouter'.
+
+        An explicit AGENT_PROVIDER wins; otherwise the first provider with a key, in that order.
+        """
+        if self.agent_provider_setting in ("gemini", "anthropic", "openrouter"):
+            return self.agent_provider_setting
+        for name in ("gemini", "anthropic", "openrouter"):
+            if self._provider_key(name):
+                return name
+        return "gemini"
+
+    def _provider_key(self, name: str) -> str:
+        return {"gemini": self.gemini_api_key, "anthropic": self.anthropic_api_key,
+                "openrouter": self.openrouter_api_key}[name]
+
+    @property
+    def agent_active_model(self) -> str:
+        return {"gemini": self.gemini_model, "anthropic": self.agent_model,
+                "openrouter": self.openrouter_model}[self.agent_provider]
+
+    @property
+    def agent_configured(self) -> bool:
+        return bool(self._provider_key(self.agent_provider))
 
     @property
     def is_production(self) -> bool:

@@ -11,6 +11,7 @@ Gearhead FEA backend - FastAPI application.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 import threading
 from typing import Any, Dict, List
@@ -24,9 +25,9 @@ from . import agent as agent_mod, history, jobs, models, parts as parts_mod, pla
 from .config import settings
 from .database import Base, engine, get_db
 from .deps import current_user, owned_project, require_pro_for, tier_of, verify_origin
-from .fea import cad, inp, meshgen, structmesh
+from .fea import cad, gmsh_options, inp, meshgen, structmesh
 from .fea import structural as struct_mod
-from .fea.elements import ELEMENT_TYPES
+from .fea.elements import ELEMENT_TYPES, element_type as get_element_type
 from .fea.model import FEMesh
 from .fea.runner import ANALYSIS_TYPES
 from .ratelimit import RateLimiter
@@ -53,7 +54,7 @@ def _migrate_schema():
         "analysis_type": "VARCHAR", "n_modes": "INTEGER", "gravity": "JSON",
         "element_type": "VARCHAR", "settings": "JSON", "reference_points": "JSON",
         "constraints": "JSON", "node_sets": "JSON", "materials": "JSON", "parts": "JSON", "surface_parts": "JSON",
-        "history_pos": "INTEGER", "history_labels": "JSON",
+        "surface_mid": "JSON", "history_pos": "INTEGER", "history_labels": "JSON",
     }
     with engine.begin() as conn:
         for col, typ in additions.items():
@@ -134,6 +135,9 @@ def capabilities():
         "free_analysis_types": ["static"],
         "element_types": [{"id": k, "nodes": v.n_nodes, "kind": v.kind} for k, v in ELEMENT_TYPES.items()],
         "shapes": meshgen.SHAPES,
+        "shape_defaults": meshgen.DEFAULT_DIMS,
+        "gmsh": {"available": cad.available(), "version": cad.version(), "options": gmsh_options.catalogue(),
+                 "sweepable_shapes": ["box", "cylinder", "tube", "plate_hole", "lbracket"]},
         "structural_types": [{"id": k, "nodes": n} for k, n in struct_mod.STRUCT_TYPES.items()],
         "structural_shapes": structmesh.KINDS,
         "cad_import": {"available": cad.available(), "formats": list(cad.FORMATS), "units": list(cad.UNITS)},
@@ -213,6 +217,7 @@ def _set_structural(project: models.Project, nodes, elems, etype: str, parts=Non
     project.elements = elems.tolist()
     project.element_type = etype
     project.surface_faces = _struct_triangles(etype, elems)
+    project.surface_mid = []
     sec = _clean_section(etype, section)
     project.parts = parts if parts else [{"id": "p0", "name": name, "elem_start": 0, "elem_end": int(len(elems)),
                                           "material_id": material_id, "section": sec}]
@@ -224,6 +229,13 @@ def _set_structural(project: models.Project, nodes, elems, etype: str, parts=Non
     project.node_sets = []
 
 
+def _set_surface(project: models.Project, mesh: FEMesh) -> None:
+    """Render triangles of the solid's boundary, plus the mid-side node of every triangle edge for quadratic meshes."""
+    b = mesh.boundary()
+    project.surface_faces = b.tris.tolist()
+    project.surface_mid = b.tri_mid.tolist() if mesh.et.n_nodes > mesh.et.n_corner else []
+
+
 def _set_mesh(project: models.Project, mesh: FEMesh, part_name: str = "Body", parts=None) -> None:
     """Install a mesh (as one part, or the given parts) and clear everything that referenced the old one."""
     if mesh.n_nodes > MAX_NODES:
@@ -232,7 +244,7 @@ def _set_mesh(project: models.Project, mesh: FEMesh, part_name: str = "Body", pa
     project.nodes = mesh.nodes.tolist()
     project.elements = mesh.elems.tolist()
     project.element_type = mesh.et.name
-    project.surface_faces = mesh.boundary().tris.tolist()
+    _set_surface(project, mesh)
     project.parts = parts if parts else parts_mod.default_parts(mesh.n_elems, part_name)
     project.surface_parts = parts_mod.surface_parts(mesh, project.parts)
     project.boundary_conditions = []
@@ -310,7 +322,7 @@ def _limit_check(user: models.User, db: Session) -> None:
 def _blank_project(user: models.User, name: str, description: str = "") -> models.Project:
     return models.Project(
         owner_id=user.id, name=name.strip(), description=description or "",
-        nodes=[], elements=[], surface_faces=[], element_type="C3D4",
+        nodes=[], elements=[], surface_faces=[], surface_mid=[], element_type="C3D4",
         material={"name": "Steel", "E": 210e9, "nu": 0.3, "density": 7850.0, "conductivity": 50.0,
                   "specific_heat": 490.0, "alpha": 12e-6, "yield_stress": 0.0, "hardening": 0.0},
         boundary_conditions=[], loads=[], constraints=[], reference_points=[], node_sets=[],
@@ -451,13 +463,54 @@ def export_inp(project: models.Project = Depends(owned_project)):
 
 
 # ------------------------------------------------------------------- Mesh
+def _make_primitive(payload: schemas.PrimitiveMeshRequest, force_type: str = None) -> FEMesh:
+    """Mesh a primitive with the built-in generators or with Gmsh. `force_type` pins the element type (adding a body)."""
+    try:
+        et = get_element_type(force_type or payload.element_type)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    if payload.mesher != "gmsh":
+        try:
+            return meshgen.generate(payload.shape, payload.dims, payload.divisions, et.name)
+        except ValueError as exc:
+            raise HTTPException(400, f"Mesh generation failed: {exc}")
+    opts = dict(payload.gmsh or {})
+    if force_type or "family" not in opts:
+        opts["family"] = "hex" if et.kind == "hex" else "tet"
+    if force_type or "order" not in opts:
+        opts["order"] = 2 if et.n_nodes > et.n_corner else 1
+    try:
+        res = cad.mesh_primitive(payload.shape, payload.dims, payload.divisions, opts)
+    except cad.CadError as exc:
+        raise HTTPException(400, f"Mesh generation failed: {exc}")
+    except RuntimeError as exc:
+        raise HTTPException(501, str(exc))
+    try:
+        mesh = FEMesh(res.nodes, res.elems, res.element_type)
+    except ValueError as exc:
+        raise HTTPException(400, f"Mesh generation failed: {exc}")
+    if mesh.n_elems > meshgen.MAX_ELEMENTS:
+        raise HTTPException(400, f"Mesh generation failed: Mesh would have {mesh.n_elems} elements "
+                                 f"(limit {meshgen.MAX_ELEMENTS}). Use a larger element size.")
+    return mesh
+
+
+def _parts_from_ends(stem: str, ends, n_elems: int) -> list:
+    """One part per solid: `ends` holds the cumulative element count after each solid."""
+    plist, start = [], 0
+    for k, end in enumerate(int(e) for e in ends[:50]):
+        plist.append({"id": f"p{k}", "name": stem if len(ends) == 1 else f"{stem} {k + 1}", "elem_start": start,
+                      "elem_end": end, "material_id": "default"})
+        start = end
+    if start < n_elems and plist:                    # more than 50 solids: the rest joins the last part
+        plist[-1]["elem_end"] = n_elems
+    return plist
+
+
 @app.post("/api/projects/{project_id}/mesh/primitive", response_model=schemas.ProjectOut)
 def generate_primitive(payload: schemas.PrimitiveMeshRequest, project: models.Project = Depends(owned_project),
                        db: Session = Depends(get_db)):
-    try:
-        mesh = meshgen.generate(payload.shape, payload.dims, payload.divisions, payload.element_type)
-    except ValueError as exc:
-        raise HTTPException(400, f"Mesh generation failed: {exc}")
+    mesh = _make_primitive(payload)
     _set_mesh(project, mesh, meshgen.SHAPES.get(payload.shape, "Body"))
     return _commit(db, project, "Generate mesh")
 
@@ -465,12 +518,9 @@ def generate_primitive(payload: schemas.PrimitiveMeshRequest, project: models.Pr
 @app.post("/api/projects/{project_id}/mesh/append", response_model=schemas.ProjectOut)
 def append_part(payload: schemas.AppendPartRequest, project: models.Project = Depends(owned_project),
                 db: Session = Depends(get_db)):
-    """Add another primitive as a separate body (use ties/rigid constraints to join bodies)."""
+    """Add another primitive as a separate body (use ties/rigid constraints to join bodies). It takes the model's element type."""
     base = _fem_mesh(project)
-    try:
-        part = meshgen.generate(payload.shape, payload.dims, payload.divisions, base.et.name)
-    except ValueError as exc:
-        raise HTTPException(400, f"Mesh generation failed: {exc}")
+    part = _make_primitive(payload, base.et.name)
     if len(payload.offset) != 3:
         raise HTTPException(422, "offset needs 3 numbers")
     import numpy as np
@@ -574,8 +624,20 @@ async def import_mesh(file: UploadFile = File(...), project: models.Project = De
     try:
         body = raw.decode("utf-8", errors="replace")
         model = None
+        msh_parts = None
         if name.endswith(".msh"):
-            mesh = inp.import_msh(body)
+            try:
+                mesh = inp.import_msh(body)
+            except inp.InpError as text_error:            # not Gmsh 2.2 ASCII: let Gmsh itself read it (v4, binary, high order)
+                if not cad.available():
+                    raise text_error
+                try:
+                    res = cad.mesh_msh(raw, "m")
+                except cad.CadError as exc:
+                    raise HTTPException(400, f"Could not read mesh: {exc}")
+                mesh = FEMesh(res.nodes, res.elems, res.element_type)
+                msh_parts = _parts_from_ends(os.path.splitext(os.path.basename(file.filename or "Mesh"))[0][:40] or "Mesh",
+                                             res.ends, mesh.n_elems)
         elif name.endswith(".inp"):
             model = inp.import_inp_model(body)
             mesh = model.mesh
@@ -583,7 +645,7 @@ async def import_mesh(file: UploadFile = File(...), project: models.Project = De
             raise HTTPException(415, "Unsupported file type. Use .inp (Abaqus/CalculiX) or .msh (Gmsh 2.2 ASCII).")
     except (inp.InpError, ValueError) as exc:
         raise HTTPException(400, f"Could not read mesh: {exc}")
-    _set_mesh(project, mesh)
+    _set_mesh(project, mesh, parts=msh_parts if msh_parts and len(msh_parts) > 1 else None)
     if model is not None:
         _apply_inp_parts(project, mesh, model)
     return _commit(db, project, "Import mesh")
@@ -599,36 +661,37 @@ def custom_structural(payload: schemas.CustomStructuralMesh, project: models.Pro
 
 @app.post("/api/projects/{project_id}/mesh/cad", response_model=schemas.ProjectOut)
 def import_cad(file: UploadFile = File(...), size: float = Form(0.0), order: int = Form(2), unit: str = Form("mm"),
+               family: str = Form("tet"), options: str = Form(""),
                project: models.Project = Depends(owned_project), db: Session = Depends(get_db)):
     """
-    Mesh a STEP / IGES / STL file with Gmsh into Tet4 (order 1) or Tet10 (order 2). Each solid becomes a part.
-    `size` is the target element size in metres (0 = automatic), `unit` the length unit of the file (mm, cm, m, in).
-    The geometry kernel runs in a separate process with a time limit.
+    Mesh a STEP / IGES / BREP / STL file with Gmsh. Each solid becomes a part. `family` is "tet" (Tet4 / Tet10) or "hex"
+    (Hex8 / Hex20), `order` 1 or 2, `size` the target element size in metres (0 = automatic) and `unit` the length unit of the
+    file (mm, cm, m, in). `options` is an optional JSON object with any further Gmsh option (algorithms, refinement regions,
+    optimisers - see fea/gmsh_options.py). The geometry kernel runs in a separate process with a time limit.
     """
     raw = file.file.read(MAX_UPLOAD_BYTES + 1)
     if len(raw) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, "File too large (limit 25 MB)")
     try:
-        nodes, elems, ends = cad.mesh_cad(raw, file.filename or "", size, order, unit)
+        extra = json.loads(options) if options.strip() else {}
+        if not isinstance(extra, dict):
+            raise ValueError("options must be a JSON object")
+    except ValueError as exc:
+        raise HTTPException(422, f"Invalid Gmsh options: {exc}")
+    extra.setdefault("family", family)
+    try:
+        res = cad.mesh_cad(raw, file.filename or "", size, order, unit, extra)
     except cad.CadError as exc:
         raise HTTPException(400, f"Could not import the CAD file: {exc}")
     except RuntimeError as exc:
         raise HTTPException(501, str(exc))
-    etype = "C3D4" if order == 1 else "C3D10"
     try:
-        mesh = FEMesh(nodes, elems, etype)
+        mesh = FEMesh(res.nodes, res.elems, res.element_type)
     except ValueError as exc:
         raise HTTPException(400, f"The imported mesh is invalid: {exc}")
     stem = (os.path.splitext(os.path.basename(file.filename or "CAD"))[0] or "CAD")[:40]
-    plist, start = [], 0
-    for k, end in enumerate(int(e) for e in ends[:50]):
-        plist.append({"id": f"p{k}", "name": stem if len(ends) == 1 else f"{stem} {k + 1}", "elem_start": start,
-                      "elem_end": end, "material_id": "default"})
-        start = end
-    if start < mesh.n_elems:                         # more than 50 solids: the rest joins the last part
-        plist[-1]["elem_end"] = mesh.n_elems
     try:
-        _set_mesh(project, mesh, parts=plist)
+        _set_mesh(project, mesh, parts=_parts_from_ends(stem, res.ends, mesh.n_elems))
     except ValueError as exc:
         raise HTTPException(400, f"The imported mesh is invalid: {exc}")
     return _commit(db, project, "Import CAD")
@@ -776,13 +839,14 @@ def delete_part(part_id: str, project: models.Project = Depends(owned_project), 
         project.elements = elems.tolist()
         project.parts = new_parts
         project.surface_faces = _struct_triangles(project.element_type, elems)
+        project.surface_mid = []
         project.surface_parts = _struct_surface_parts(project.element_type, new_parts, len(elems))
     else:
         mesh = FEMesh(nodes, elems, project.element_type or "C3D4")
         project.nodes = mesh.nodes.tolist()
         project.elements = mesh.elems.tolist()
         project.parts = new_parts
-        project.surface_faces = mesh.boundary().tris.tolist()
+        _set_surface(project, mesh)
         project.surface_parts = parts_mod.surface_parts(mesh, new_parts)
     for key, value in setup.items():
         setattr(project, key, value)
@@ -974,7 +1038,9 @@ _agent_limiter = RateLimiter(settings.agent_requests_per_minute, 60)
 
 @app.get("/api/agent/status")
 def agent_status(user: models.User = Depends(current_user)):
-    return {"available": agent_mod.available(), "model": settings.agent_model if agent_mod.available() else None}
+    on = agent_mod.available()
+    return {"available": on, "model": settings.agent_active_model if on else None,
+            "provider": settings.agent_provider if on else None}
 
 
 @app.post("/api/projects/{project_id}/agent/chat")
@@ -987,7 +1053,7 @@ def agent_chat(payload: agent_mod.ChatRequest, project: models.Project = Depends
     if payload.messages[-1].role != "user":
         raise HTTPException(422, "The last message must come from the user")
     if not agent_mod.available():
-        raise HTTPException(503, "The AI assistant is not configured on this server (set ANTHROPIC_API_KEY).")
+        raise HTTPException(503, agent_mod.NOT_CONFIGURED)
     if not _agent_limiter.hit(f"agent:{user.id}"):
         raise HTTPException(429, "You are sending messages too quickly. Wait a few seconds and try again.")
     out = agent_mod.run_agent(db, user, project, [m.model_dump() for m in payload.messages])
