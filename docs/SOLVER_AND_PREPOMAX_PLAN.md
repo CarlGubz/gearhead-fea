@@ -53,7 +53,7 @@ Legend: ✅ delivered here · 🟡 partly · 🗺️ roadmap (not built).
 | | New primitives: tube, plate with hole, L-bracket | ✅ |
 | | STEP/IGES/STL import (Gmsh / OpenCASCADE) | ✅ |
 | | Import mesh: Abaqus/CalculiX `.inp` | ✅ |
-| **Mesh** | Element order linear/quadratic, hex or tet | ✅ (hex only for box/L-bracket-aligned grids) |
+| **Mesh** | Element order linear/quadratic, hex or tet | ✅ (hex for **every** primitive, CAD file and `.msh` — see `MESHING_GMSH_AND_SELECTION.md`) |
 | | Mesh density control, mesh statistics & quality (volume, Jacobian, aspect) | ✅ |
 | | Gmsh meshing of arbitrary CAD (Tet4/Tet10) | ✅ |
 | | Mesh refinement fields, hex meshing of CAD | 🗺️ |

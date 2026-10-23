@@ -57,10 +57,15 @@ coordinates, and averaged over the elements sharing each node. Fields: displacem
 six stress and six strain components, equivalent strain, equivalent plastic strain, strain energy density, temperature, heat flux (x/y/z/magnitude).
 
 ## 7. Mesh generation (`meshgen.py`)
-Box and L-bracket → structured bricks (C3D8/C3D20) or Freudenthal-split tetrahedra (conforming); cylinder, sphere, tube,
-plate-with-hole → Delaunay tetrahedra with centroid filtering for holes. Quadratic meshes insert mid-side nodes and
-(for cylinder/sphere/tube) project boundary mid-nodes back onto the true surface. Every mesh is checked for inverted elements
-(tets are auto-reoriented; bricks must be valid).
+Every primitive (box, cylinder, sphere, tube, plate-with-hole, L-bracket, cone, torus) can be meshed with every solid element type.
+Box and L-bracket → Cartesian bricks (C3D8/C3D20) or Freudenthal-split tetrahedra (conforming); cylinder, cone, sphere, tube,
+plate-with-hole and torus → **mapped structured bricks** (square→disc and cube→ball mappings, polar rings, an O-grid around the hole,
+a swept section for the torus); the tetrahedra of cone and torus are those bricks split six ways, while cylinder, sphere, tube and
+plate-with-hole keep their Delaunay tetrahedra (centroid filtering for holes). Quadratic meshes insert mid-side nodes and project
+boundary mid-nodes of curved surfaces back onto the true surface (backing off where a full move would fold an element).
+Every mesh is checked for inverted elements (tets and bricks that are inside out are auto-reoriented; a brick whose Jacobian
+changes sign inside is rejected). The same shapes can be meshed by Gmsh, and CAD / `.msh` files can be meshed or read as tets or
+bricks — see [`MESHING_GMSH_AND_SELECTION.md`](MESHING_GMSH_AND_SELECTION.md).
 
 ## 8. Verification (all automated — `backend/tests/fea`, `backend/tests/test_simulation_api.py`)
 | Benchmark | Closed form | Observed |

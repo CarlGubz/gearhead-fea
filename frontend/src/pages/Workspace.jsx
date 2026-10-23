@@ -16,6 +16,7 @@ import JobPanel from "../components/JobPanel.jsx";
 import ProjectPanel from "../components/ProjectPanel.jsx";
 import MessagesPanel from "../components/MessagesPanel.jsx";
 import AgentPanel from "../components/AgentPanel.jsx";
+import GuidePanel from "../components/GuidePanel.jsx";
 import Legend from "../components/Legend.jsx";
 import TreeSection from "../components/TreeSection.jsx";
 import {
@@ -84,6 +85,7 @@ export default function Workspace() {
   const [messages, setMessages] = useState([]);
   const [msgOpen, setMsgOpen] = useState(false);
   const [agentOpen, setAgentOpen] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false);
   const viewApi = useRef(null);
   const pollRef = useRef(null);
 
@@ -499,8 +501,10 @@ export default function Workspace() {
         <div className="divider" />
         {health && <span className={`badge ${health.status === "ok" ? "ok" : "warn"}`}>{statusText}</span>}
         <div className="spacer" />
-        <button className={`toolbar-btn ${agentOpen ? "active" : ""}`} style={navBtn} onClick={() => setAgentOpen((o) => !o)}
+        <button className={`toolbar-btn ${agentOpen ? "active" : ""}`} style={navBtn} onClick={() => setAgentOpen((o) => !o)} data-tour="ai"
           title="Describe a problem in plain language and let the AI build and run the simulation">✦ AI Assistant</button>
+        <button className={`toolbar-btn ${guideOpen ? "active" : ""}`} style={navBtn} onClick={() => setGuideOpen((o) => !o)} data-tour="guide"
+          title="Step-by-step walkthrough of how to use the workspace">? Guide</button>
         <Link className="toolbar-btn" to="/account" title="Account & billing" style={{ ...navBtn, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis" }}>
           {isPro ? "Pro" : "Free"} · {user?.email}
         </Link>
@@ -515,46 +519,39 @@ export default function Workspace() {
       <div className="body">
         <aside className="sidebar left">
           <div className="tree-root">
-            <TreeSection icon="01" title="Project" defaultOpen>
+            <TreeSection icon="01" title="Project" tour="project" defaultOpen>
               <ProjectPanel projects={projects} activeId={activeId} onSelect={selectProject} onCreate={handleCreate}
                 onDelete={handleDelete} onSave={handleSave} onOpen={handleOpen} onExportInp={handleExportInp}
                 history={history} onUndo={handleUndo} onRedo={handleRedo} />
             </TreeSection>
             {project && (
-              <TreeSection icon="02" title="Geometry & Mesh" defaultOpen={!hasMesh}>
+              <TreeSection icon="02" title="Geometry & Mesh" tour="geometry" defaultOpen={!hasMesh}>
                 <GeometryPanel elementType={project.element_type} quality={quality} hasMesh={hasMesh}
                   materials={project.materials} defaultMaterial={project.material} gmsh={caps?.gmsh}
                   onGenerate={handleGenerate} onAppend={handleAppend} onImport={handleImportMesh} onImportCad={handleImportCad} />
               </TreeSection>
             )}
             {project && (
-              <TreeSection icon="02" title="Beams, trusses, shells, springs" badge={structuralType} defaultOpen={!!structuralType}>
+              <TreeSection icon="02" title="Beams, trusses, shells, springs" tour="structural" badge={structuralType} defaultOpen={!!structuralType}>
                 <StructuralPanel project={project} hasMesh={hasMesh} onGenerate={handleGenerateStructural}
                   onAppend={handleAppendStructural} onCustom={handleCustomStructural} onMessage={notify} />
               </TreeSection>
             )}
             {hasMesh && (
-              <TreeSection icon="03" title="Parts" badge={project.parts?.length || null} defaultOpen={(project.parts?.length || 0) > 1}>
+              <TreeSection icon="03" title="Parts" tour="parts" badge={project.parts?.length || null} defaultOpen={(project.parts?.length || 0) > 1}>
                 <PartsPanel parts={project.parts} defaultMaterial={project.material} materials={project.materials}
                   hidden={hiddenParts} onToggle={togglePart} onUpdate={handlePartUpdate}
                   onMove={handlePartMove} onDelete={handlePartDelete} structuralType={structuralType} />
               </TreeSection>
             )}
             {project && (
-              <TreeSection icon="04" title="Materials" badge={1 + (project.materials?.length || 0)} defaultOpen={false}>
+              <TreeSection icon="04" title="Materials" tour="materials" badge={1 + (project.materials?.length || 0)} defaultOpen={false}>
                 <MaterialPanel material={project.material} materials={project.materials} parts={project.parts}
                   onUpdate={handleMaterialUpdate} onAdd={handleMaterialAdd} onDelete={handleMaterialDelete} />
               </TreeSection>
             )}
-            {project && (
-              <TreeSection icon="04" title="Analysis" badge={analysisType} defaultOpen>
-                <AnalysisPanel analysisType={analysisType} settings={project.settings} gravity={project.gravity} isPro={isPro}
-                  onChangeType={handleType} onSettings={handleSettings} onGravity={(g) => mutate(api.setGravity(activeId, g))}
-                  structural={!!structuralType} />
-              </TreeSection>
-            )}
             {hasMesh && (
-              <TreeSection icon="05" title="Selection & sets" badge={selectedNodes.length + selectedFaces.length || null} defaultOpen={false}>
+              <TreeSection icon="05" title="Selection & sets" tour="selection" badge={selectedNodes.length + selectedFaces.length || null} defaultOpen={false}>
                 <SelectionPanel nodes={project.nodes} faces={selectionFaces} selectedNodes={selectedNodes}
                   selectedFaces={selectedFaces} setSelectedNodes={setSelectedNodes} setSelectedFaces={setSelectedFaces}
                   angle={angle} setAngle={setAngle} sets={project.node_sets}
@@ -586,13 +583,23 @@ export default function Workspace() {
             <AgentPanel projectId={activeId} solving={solving} onClose={() => setAgentOpen(false)}
               onProject={handleAgentProject} onRun={handleAgentRun} />
           )}
+          {guideOpen && (
+            <GuidePanel project={project} job={job} solving={solving} isPro={isPro} onClose={() => setGuideOpen(false)} />
+          )}
           {display.field && <Legend label={display.label} min={fmt(legendRange[0])} max={fmt(legendRange[1])} unit={display.unit} />}
         </main>
 
         <aside className="sidebar right">
           <div className="tree-root">
+            {project && (
+              <TreeSection icon="06" title="Analysis" tour="analysis" badge={analysisType} defaultOpen>
+                <AnalysisPanel analysisType={analysisType} settings={project.settings} gravity={project.gravity} isPro={isPro}
+                  onChangeType={handleType} onSettings={handleSettings} onGravity={(g) => mutate(api.setGravity(activeId, g))}
+                  structural={!!structuralType} />
+              </TreeSection>
+            )}
             {hasMesh && (
-              <TreeSection icon="06" title="Supports & loads" badge={loadsCount || null} defaultOpen>
+              <TreeSection icon="07" title="Supports & loads" tour="loads" badge={loadsCount || null} defaultOpen>
                 <BCLoadPanel analysisType={analysisType} selectedNodes={selectedNodes} selectedFaces={selectedFaces}
                   boundaryConditions={project.boundary_conditions} loads={project.loads} refPoints={project.reference_points}
                   structuralType={structuralType} parts={project.parts} onAddBC={handleAddBC} onDeleteBC={(id) => mutate(api.deleteBC(activeId, id))}
@@ -600,7 +607,7 @@ export default function Workspace() {
               </TreeSection>
             )}
             {hasMesh && !structuralType && (
-              <TreeSection icon="07" title="Constraints" badge={(project.constraints?.length || 0) + (project.reference_points?.length || 0) || null} defaultOpen={false}>
+              <TreeSection icon="08" title="Constraints" tour="constraints" badge={(project.constraints?.length || 0) + (project.reference_points?.length || 0) || null} defaultOpen={false}>
                 <ConstraintPanel nodes={project.nodes} selectedNodes={selectedNodes} selectedFaces={selectedFaces} parts={project.parts}
                   refPoints={project.reference_points} constraints={project.constraints} sets={project.node_sets}
                   onAddRef={(rp) => mutate(api.addReferencePoint(activeId, rp))} onDeleteRef={(id) => mutate(api.deleteReferencePoint(activeId, id))}
@@ -609,7 +616,7 @@ export default function Workspace() {
               </TreeSection>
             )}
             {project && (
-              <TreeSection icon="08" title="Solve & results" defaultOpen>
+              <TreeSection icon="09" title="Solve & results" tour="solve" defaultOpen>
                 <JobPanel onSolve={handleSolve} solving={solving} job={job} project={project} sel={sel} setSel={setSel}
                   view={view} setView={setView} display={display} fieldRange={fieldRange} probe={probe}
                   onExport={handleExport} onClearResults={clearResults}

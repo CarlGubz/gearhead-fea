@@ -414,8 +414,9 @@ function Rig({ bbox, viewCommand, onApi }) {
       back: [cx, cy + d * 1.4, cz],
       right: [cx + d * 1.4, cy, cz],
       left: [cx - d * 1.4, cy, cz],
-      top: [cx + d * 0.0001, cy - d * 0.0001, cz + d * 1.4],
-      bottom: [cx + d * 0.0001, cy + d * 0.0001, cz - d * 1.4],
+      // offset along -y only, so the screen's up axis is +y and x runs left to right (an x offset would rotate the view)
+      top: [cx, cy - d * 0.001, cz + d * 1.4],
+      bottom: [cx, cy + d * 0.001, cz - d * 1.4],
     };
     const p = views[viewCommand?.name || "iso"] || views.iso;
     camera.position.set(p[0], p[1], p[2]);

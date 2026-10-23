@@ -1,10 +1,10 @@
 import React, { useState } from "react";
 
-export default function TreeSection({ icon, title, badge, defaultOpen = true, children }) {
+export default function TreeSection({ icon, title, badge, defaultOpen = true, tour, children }) {
   const [open, setOpen] = useState(defaultOpen);
 
   return (
-    <div className="tree-section">
+    <div className="tree-section" data-tour={tour}>
       <div className="tree-section-header" onClick={() => setOpen((o) => !o)}>
         <span className={`tree-chevron ${open ? "open" : ""}`}>❯</span>
         <span className="tree-icon">{icon}</span>

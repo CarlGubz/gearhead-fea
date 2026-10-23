@@ -29,6 +29,8 @@ Dev defaults: mock GCash, `http://localhost:5173`. The backend creates all table
 | `DATABASE_URL` | `postgresql://user:pass@host:5432/db` | SQLite file (dev/test only) |
 | `PAYMENT_PROVIDER` | `paymongo` or `mock` | `mock` |
 | `PAYMONGO_SECRET_KEY`, `PAYMONGO_WEBHOOK_SECRET` | PayMongo credentials | — |
+| `ANTHROPIC_API_KEY` | enables the AI assistant (server-side only; empty = assistant off) | — |
+| `AGENT_MODEL`, `AGENT_MAX_TURNS`, `AGENT_REQUESTS_PER_MINUTE` | assistant model, tool-loop cap, per-user rate limit | `claude-sonnet-5-5` / 14 / 12 |
 | `COOKIE_SECURE` | force `Secure` cookies | true in production |
 | `SMTP_HOST/PORT/USER/PASSWORD`, `MAIL_FROM` | password-reset & receipt mail (empty host = log to console) | — |
 | `FREE_MAX_PROJECTS`, `SESSION_DAYS`, `MAX_FAILED_LOGINS`, `LOCKOUT_MINUTES`, `RESET_TOKEN_MINUTES` | tunables | 3 / 14 / 5 / 15 / 60 |
@@ -39,7 +41,7 @@ With `APP_ENV=production` the API **refuses to start** unless: DB is PostgreSQL,
 cookies are `Secure`, the provider is not `mock`, and PayMongo keys are set.
 
 ## CAD import (Gmsh)
-`gmsh` is a normal Python dependency (`requirements.txt`). The API runs it in a child process (`python -m app.fea.cad_worker`) with a 180 s limit, so make sure
+`gmsh` is a normal Python dependency (`requirements.txt`). The API runs it in a child process (`python -m app.fea.gmsh_worker`) with a 180 s limit, so make sure
 the backend image has `libglu1-mesa`, `libxrender1`, `libxcursor1`, `libxft2`, `libxinerama1`, `libfontconfig1` and `libgomp1` (the provided `Dockerfile` installs them -
 **that image was not built or run in the development environment, so verify it once**). If Gmsh is missing the endpoint answers 501 with an install hint and
 `/api/capabilities` reports `cad_import.available = false`. Gmsh is GPL-2+ (OpenCASCADE linking exception): review the licence before distributing the image.

@@ -77,7 +77,7 @@ A structural project has **one element type** (stored in `element_type`), parts 
 ## 3. CAD import (STEP / IGES / STL)
 
 **Design decision.** Reading B-rep CAD and meshing a volume needs a geometry kernel; writing one is not realistic. We use **Gmsh** (Python API, bundles OpenCASCADE) as an optional dependency:
-- `POST /api/projects/{id}/mesh/cad` (multipart: file, `size` = target element size, `order` = 1 or 2) → Tet4 / Tet10 volume mesh via Gmsh. One part per CAD solid (so assemblies import as several parts, with their own materials).
+- `POST /api/projects/{id}/mesh/cad` (multipart: file, `size` = target element size, `order` = 1 or 2; later also `family` tet / hex) → Tet4 / Tet10 (or Hex8 / Hex20) volume mesh via Gmsh. One part per CAD solid (so assemblies import as several parts, with their own materials).
 - STEP (`.step`, `.stp`), IGES (`.iges`, `.igs`) via OpenCASCADE; STL (`.stl`, ASCII or binary) by classifying the surface mesh and meshing the enclosed volume (the STL must be watertight).
 - Safety: size limit, time limit, runs in a worker thread, node limit as for other meshes, readable errors for an open/non-manifold surface, empty file or unsupported units.
 - Gmsh not installed → endpoint answers 501 with an install hint and the UI hides nothing (it explains).
@@ -164,8 +164,10 @@ Known limits (not hidden):
 * pressure sign: positive pushes against the element normal (right-hand rule of the node order).
 
 ### 5.3 CAD import
-`POST /api/projects/{id}/mesh/cad` (multipart: file, `size` in metres or 0 for automatic, `order` 1 or 2, `unit` mm / cm / m / in). Gmsh (OpenCASCADE) runs in a
-**separate process** (`cad_worker.py`) with a 180 s time limit, so a kernel crash or hang cannot take down the API; one part per solid.
+`POST /api/projects/{id}/mesh/cad` (multipart: file, `size` in metres or 0 for automatic, `order` 1 or 2, `unit` mm / cm / m / in; since the Gmsh
+extension also `family` = `tet` / `hex` and `options` = JSON with any Gmsh option, and `.brep` files). Gmsh (OpenCASCADE) runs in a
+**separate process** (`gmsh_worker.py`, formerly `cad_worker.py`) with a 180 s time limit, so a kernel crash or hang cannot take down the API; one part per solid.
+Bricks, algorithm choices, refinement regions and the other options: [`MESHING_GMSH_AND_SELECTION.md`](MESHING_GMSH_AND_SELECTION.md).
 
 | Check | Result |
 |---|---|
@@ -182,7 +184,7 @@ Safeguards found necessary while testing: flat sliver tetrahedra that Gmsh creat
 edges for STL (and fall back to straight edges for STEP/IGES if a curved element would fold).
 
 Known limits: STL must be a closed manifold surface and the volume mesh re-parameterises it (the STL facet size is not kept); no feature suppression or geometry healing beyond what
-OpenCASCADE does on read; multi-solid assemblies are meshed per solid (touching faces are not conforming - join them with a *Tie between parts*); Tet4 / Tet10 only (no hex meshing of CAD);
+OpenCASCADE does on read; multi-solid assemblies are meshed per solid (touching faces are not conforming - join them with a *Tie between parts*); bricks of a CAD file are made by splitting tetrahedra (Hex8 / Hex20, see the Gmsh document);
 STEP colours and names are ignored; units are chosen by the user, not read from the file.
 **Gmsh is GPL-2+ (with an OpenCASCADE linking exception).** Running it inside your own service is fine; redistributing a Docker image that contains it to third parties
 needs a licence review. The Docker image installs the shared libraries Gmsh needs (`libglu1-mesa` and friends) - **that image build was not run in this environment.**
